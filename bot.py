@@ -19,6 +19,7 @@ Requires mcp_server/server.py to already be running in another terminal.
 """
 
 import asyncio
+import json
 import os
 import sys
 
@@ -26,11 +27,17 @@ from dotenv import load_dotenv
 from loguru import logger
 from mcp.client.session_group import StreamableHttpParameters
 
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker, ProcessorUnusablePolicy
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    AssistantTurnStoppedMessage,
+    LLMContextAggregatorPair,
+    UserTurnMessageAddedMessage,
+)
 from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
 from pipecat.services.mcp_service import MCPClient
 from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
@@ -90,6 +97,48 @@ the caller means, ask a clarifying question rather than guessing.
 """.strip()
 
 
+def _parse_json_tool_results(tools: ToolsSchema) -> ToolsSchema:
+    """Make MCP tool results objects again before they reach the LLM.
+
+    Pipecat's MCP client always hands back a tool's result as a JSON-text
+    string (that's just how MCP content works). AWS Nova Sonic only JSON-
+    encodes a tool result if it's already a Python dict — a string gets sent
+    through as-is, which AWS then rejects ("Unsupported JSON type in Tool
+    Result. Please provide the Tool Result as a JSON object"). Parsing the
+    string back into an object here, once, fixes it for every tool.
+    """
+
+    def with_json_parsing(original_handler):
+        async def wrapped(params):
+            original_callback = params.result_callback
+
+            async def parsing_callback(result, **kwargs):
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                await original_callback(result, **kwargs)
+
+            params.result_callback = parsing_callback
+            await original_handler(params)
+
+        return wrapped
+
+    return ToolsSchema(
+        standard_tools=[
+            FunctionSchema(
+                name=schema.name,
+                description=schema.description,
+                properties=schema.properties,
+                required=schema.required,
+                handler=with_json_parsing(schema.handler),
+            )
+            for schema in tools.standard_tools
+        ]
+    )
+
+
 async def main():
     missing = [
         var
@@ -105,7 +154,7 @@ async def main():
 
     logger.info(f"Connecting to MCP server at {MCP_SERVER_URL} ...")
     mcp = MCPClient(server_params=StreamableHttpParameters(url=MCP_SERVER_URL))
-    tools = await mcp.tools()
+    tools = _parse_json_tool_results(await mcp.tools())
     logger.info("MCP tools loaded.")
 
     transport = LocalAudioTransport(
@@ -145,6 +194,14 @@ async def main():
 
     runner = WorkerRunner(handle_sigint=False if sys.platform == "win32" else True)
     await runner.add_workers(worker)
+
+    @user_aggregator.event_handler("on_user_turn_message_added")
+    async def on_user_turn_message_added(aggregator, message: UserTurnMessageAddedMessage):
+        logger.info(f"You: {message.content}")
+
+    @assistant_aggregator.event_handler("on_assistant_turn_stopped")
+    async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
+        logger.info(f"Ava: {message.content}")
 
     async def kick_off():
         # Local mic/speaker audio has no "client connected" event to hook,
