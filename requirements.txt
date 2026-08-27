@@ -1,0 +1,2 @@
+pipecat-ai[aws-nova-sonic,local,mcp]>=1.8.0,<2
+python-dotenv>=1.0.1,<2.0.0
