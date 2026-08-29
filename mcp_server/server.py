@@ -1,4 +1,4 @@
-"""Mock MCP server exposing the three tools Ava uses.
+"""Mock MCP server exposing the four tools Ava uses.
 
 This is a *mock* backend — data lives in memory (see data.py) and resets
 every time the process restarts. It exists so the whole voice agent runs
@@ -23,16 +23,131 @@ valid) live here, inside the tools, as plain data validation. That keeps
 allowed) deterministic, without the two getting tangled together.
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from data import CLAIMS, HANDOFFS, POLICIES
+from data import CLAIMS, CLOSED_CLAIM_STATUSES, HANDOFFS, POLICIES
 
 mcp = FastMCP("Ava Policy & Claims Tools", host="127.0.0.1", port=8787)
 
 VALID_URGENCY_LEVELS = {"low", "normal", "high", "urgent"}
+
+# Accepts the wide range of date shapes a caller's spoken date might get
+# transcribed as, on top of the ISO format tools are asked to use.
+_DOB_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%m/%d/%Y",
+    "%d/%m/%Y",
+    "%m-%d-%Y",
+    "%d-%m-%Y",
+    "%m.%d.%Y",
+    "%d.%m.%Y",
+    "%B %d, %Y",
+    "%B %d %Y",
+    "%b %d, %Y",
+    "%b %d %Y",
+    "%d %B, %Y",
+    "%d %B %Y",
+    "%d %b, %Y",
+    "%d %b %Y",
+    "%d-%b-%Y",
+    "%d-%B-%Y",
+)
+
+
+def _normalize_phone(phone_number: str) -> str:
+    """Compare only the last 10 digits, so a missing/different country code doesn't fail a match."""
+    digits = re.sub(r"\D", "", phone_number or "")
+    return digits[-10:]
+
+
+def _normalize_dob(date_of_birth: str) -> str | None:
+    """Parse a date given in almost any common shape (ISO, slashes, spelled-out
+    month, with or without an ordinal suffix or "of") into YYYY-MM-DD."""
+    text = (date_of_birth or "").strip()
+    text = re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bof\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ,")
+    for fmt in _DOB_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+@mcp.tool()
+def verify_identity(phone_number: str, date_of_birth: str) -> dict:
+    """Verify a caller's identity by phone number and date of birth.
+
+    Call this before using get_policy_details or register_claim — a caller
+    should be authenticated before any policy or claim information is shared
+    or changed. It is not required before escalate_to_human; a caller can
+    always ask for a human agent.
+
+    Args:
+        phone_number: The caller's phone number. Give just the digits (drop
+            spaces, dashes, parentheses); the country code is optional either
+            way, matching is done on the last 10 digits.
+        date_of_birth: The caller's date of birth, converted to YYYY-MM-DD —
+            do this conversion yourself regardless of how the caller said it
+            (e.g. "12th of April 1988" or "4/12/1988" both become
+            "1988-04-12").
+
+    Returns:
+        On success: verified=True, the matched customer's name and policy
+        number, and any of their claims that are still active (not yet
+        closed/resolved/rejected) — mention those to the caller. On failure,
+        verified=False with a message explaining what didn't match.
+    """
+    normalized_dob = _normalize_dob(date_of_birth)
+    if normalized_dob is None:
+        return {
+            "verified": False,
+            "reason": "invalid_date_format",
+            "message": (
+                f"Couldn't understand the date of birth '{date_of_birth}'. "
+                "Ask the caller for their date of birth again."
+            ),
+        }
+
+    normalized_phone = _normalize_phone(phone_number)
+
+    for policy_number, policy in POLICIES.items():
+        if (
+            _normalize_phone(policy["phone_number"]) == normalized_phone
+            and policy["date_of_birth"] == normalized_dob
+        ):
+            active_claims = [
+                {
+                    "claim_id": claim["claim_id"],
+                    "status": claim["status"],
+                    "incident_date": claim["incident_date"],
+                }
+                for claim in CLAIMS.values()
+                if claim["policy_number"] == policy_number
+                and claim["status"] not in CLOSED_CLAIM_STATUSES
+            ]
+            return {
+                "verified": True,
+                "customer_name": policy["policyholder_name"],
+                "policy_number": policy_number,
+                "active_claims": active_claims,
+            }
+
+    return {
+        "verified": False,
+        "reason": "no_match",
+        "message": (
+            "No customer found matching that phone number and date of birth. "
+            "Ask the caller to double-check both and try again."
+        ),
+    }
 
 
 @mcp.tool()
