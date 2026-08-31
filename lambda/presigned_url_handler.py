@@ -17,6 +17,11 @@ Required environment variable:
 Optional environment variables:
     AWS_REGION            — defaults to the Lambda's own region
     URL_EXPIRES_SECONDS   — presigned URL validity window (default 300 = 5 min)
+    ALLOWED_ORIGIN        — the frontend origin allowed to call this Lambda
+                            (default "*" — fine for local testing, but set
+                            this to your actual frontend's origin, e.g.
+                            https://ava.example.com, before this is anything
+                            but a demo)
 
 Package `bedrock-agentcore` (see requirements.txt) into the deployment
 zip/layer — it isn't part of the default Lambda Python runtime.
@@ -34,10 +39,11 @@ URL_EXPIRES_SECONDS = int(os.environ.get("URL_EXPIRES_SECONDS", "300"))
 
 _client = AgentCoreRuntimeClient(region=REGION)
 
-# Tighten this to your actual frontend origin before going anywhere near production.
+# Defaults to "*" for local testing; set ALLOWED_ORIGIN to your actual frontend
+# origin before this is anything but a demo — see the module docstring.
 _CORS_HEADERS = {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
     "Access-Control-Allow-Methods": "GET,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
 }

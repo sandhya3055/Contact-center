@@ -195,9 +195,12 @@ aws lambda create-function \
   --role "$LAMBDA_ROLE_ARN" \
   --zip-file fileb://lambda.zip \
   --timeout 10 \
-  --environment "Variables={AGENT_RUNTIME_ARN=$AGENT_RUNTIME_ARN,AWS_REGION=us-west-2}"
+  --environment "Variables={AGENT_RUNTIME_ARN=$AGENT_RUNTIME_ARN,AWS_REGION=us-west-2,ALLOWED_ORIGIN=*}"
 
 # Function URL — simplest way for the browser to call this without API Gateway.
+# AllowOrigins here and ALLOWED_ORIGIN above both default to "*" for local
+# testing; set both to your actual frontend origin (e.g. https://ava.example.com)
+# before this is anything but a demo — see presigned_url_handler.py's docstring.
 aws lambda create-function-url-config \
   --function-name ava-presigned-url \
   --auth-type NONE \
