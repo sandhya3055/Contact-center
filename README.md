@@ -95,21 +95,16 @@ Once Ava introduces herself, give her a mobile number in E.164 format
 (e.g. "plus one four one five five five five one two three four") — that's
 both how she looks up your policy and how she treats you as verified.
 
-⚠️ **Known issue as of this writing:** `get_policy` currently fails for
-every caller with `AccessDeniedException: ... not authorized to perform:
-dynamodb:Query on resource: .../policies/index/mobileNo-index`. This is an
-IAM permissions gap on the gateway's Lambda execution role
-(`insurarncae-voice-agent-mcp-tool-role-t6n9accl`), not a bug in this
-project — that role needs a `dynamodb:Query` permission added for the
-`mobileNo-index` GSI on the `policies` table before Ava can look anyone up.
-
 ## Notes
 
-- `ESCALATE_TOOL_NAME` in `bot.py` hardcodes the gateway's current tool name
-  for escalation (`target-quick-start-t58h6f___escalate`) so `session_id`
-  can be injected automatically. If you recreate the gateway/target, this
-  name will change — update the constant to match (check the startup tool
-  list log for the new name).
+- Nothing in `bot.py` hardcodes a gateway tool's name, parameters, or
+  description — the system prompt and tool wiring are both fully dynamic,
+  driven by whatever the gateway currently exposes (`bot.py` logs the live
+  tool list at startup). The one exception, `session_id` on the escalate
+  tool, is also detected generically (by checking which tool's schema
+  requires a `session_id`, not by a hardcoded tool-name constant) — see
+  `_instrument_tools` in `bot.py`. Recreating the gateway/target needs zero
+  code changes here.
 - The voice used is Nova Sonic's "tiffany" — change `voice=` in `bot.py` to
   `matthew`, `amy`, or another supported voice
   ([voice list](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-language-support.html)).
@@ -125,3 +120,65 @@ project — that role needs a `dynamodb:Query` permission added for the
   own voice and Nova Sonic transcribes that as new caller speech — you'll
   see "You:" lines that are really just Ava's last sentence echoing back.
   Headphones remove that acoustic path entirely.
+
+## Browser UI (AWS Bedrock AgentCore Runtime + Lambda)
+
+`bot.py` is a local terminal app — talking to Ava from a browser instead
+needs a long-running server to hold the Nova Sonic session open for the
+call's duration, which plain Lambda can't do (its invocations are
+short-lived and event-driven). Three new pieces cover this:
+
+```
+browser ── fetch ──> Lambda (presigned_url_handler.py) ── returns a signed wss:// URL ──> browser
+browser ── connects directly with that URL ──> agentcore_app/strands_agent.py (AWS Bedrock AgentCore Runtime)
+                                                          │
+                                                          └── AgentCore Gateway (same MCP_SERVER_URL)
+```
+
+- **`agentcore_app/`** — the actual voice agent, hosted on **AWS Bedrock
+  AgentCore Runtime** (not Lambda — it's a long-running WebSocket container,
+  the AWS-native way to host exactly this kind of session). Same Ava
+  persona and the same gateway tools as `bot.py`, but built on the
+  [Strands Agents SDK](https://strandsagents.com)'s `BidiAgent` +
+  `BidiNovaSonicModel` instead of Pipecat, since that's what AgentCore
+  Runtime's WebSocket contract (a container serving `/ws` and `/ping` on
+  port 8080) is designed around. Talks to the gateway directly via
+  `mcp-proxy-for-aws`'s `aws_iam_streamablehttp_client` — no subprocess
+  proxy needed here, unlike `bot.py`, since Strands' MCP client accepts an
+  arbitrary async transport factory. Just like `bot.py`, every tool is
+  loaded live from the gateway with nothing hardcoded — the one
+  `session_id` exception is detected generically too (whichever tool's
+  schema requires it gets one injected and hidden from the model), so
+  changing the gateway's tools needs no code changes here either.
+  See [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md) for the full
+  deployment steps — you'll get back an agent runtime ARN
+  (`arn:aws:bedrock-agentcore:<region>:<account>:runtime/<name>-<id>`).
+- **`lambda/presigned_url_handler.py`** — the piece you asked for. Its only
+  job is minting a short-lived, SigV4-presigned WebSocket URL for that
+  runtime ARN, using the `bedrock-agentcore` Python SDK's
+  `AgentCoreRuntimeClient.generate_presigned_url()` — it never touches
+  audio. Needs `AGENT_RUNTIME_ARN` as an environment variable, and its
+  execution role needs `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream`
+  on that ARN. Package `bedrock-agentcore` (see `lambda/requirements.txt`)
+  into the deployment zip or a layer — it isn't in the base Lambda runtime.
+- **`frontend/index.html`** — a single self-contained page: enter your
+  Lambda's endpoint URL (Function URL or API Gateway), click **Talk to
+  Ava**, and it fetches the presigned URL, opens the WebSocket, streams mic
+  audio as base64 PCM16/16kHz (`{"type": "bidi_audio_input", ...}`), plays
+  back Ava's audio (`{"type": "bidi_audio_stream", ...}`), and shows a live
+  transcript. No build step — open it directly, or serve it from anywhere
+  static.
+
+**Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
+Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**
+
+To test `agentcore_app/strands_agent.py` locally before deploying it:
+```bash
+cd agentcore_app
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# reuse the same .env values as bot.py (MCP_SERVER_URL, AWS_REGION, AWS_ACCESS_KEY_ID, ...)
+python strands_agent.py
+# then point frontend/index.html's endpoint field at ws://127.0.0.1:8080/ws directly
+# (skip the Lambda for local testing — see frontend/index.html's fetch() call)
+```

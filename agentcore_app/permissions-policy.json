@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRPull",
+      "Effect": "Allow",
+      "Action": ["ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "ecr:GetAuthorizationToken"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NovaSonic",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModelWithBidirectionalStream", "bedrock:InvokeModel"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "InvokeGateway",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:InvokeGateway",
+      "Resource": "arn:aws:bedrock-agentcore:us-west-2:128486226972:gateway/gateway-quick-start-ad8a4f-evcjac2ebc"
+    }
+  ]
+}
