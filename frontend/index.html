@@ -5,74 +5,348 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ava — Voice Contact Center</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --bg: #eef1f6;
+    --surface: #ffffff;
+    --surface-alt: #f3f5f9;
+    --border: #e1e4eb;
+    --text: #12141a;
+    --text-muted: #6b7080;
+    --text-faint: #9198a8;
+    --accent: #2454e0;
+    --accent-hover: #1c44c2;
+    --accent-soft: #2454e014;
+    --ring: #2454e033;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --success: #16a34a;
+    --warning: #b45309;
+    --header-bg: #12162a;
+    --header-text: #f4f6fb;
+    --header-text-muted: #9aa3c0;
+    --shadow: 0 1px 2px rgba(15, 18, 30, 0.04), 0 1px 12px rgba(15, 18, 30, 0.03);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0d13;
+      --surface: #151822;
+      --surface-alt: #1c202c;
+      --border: #262b3a;
+      --text: #edeff5;
+      --text-muted: #9aa0b4;
+      --text-faint: #6b7080;
+      --accent: #3b6bff;
+      --accent-hover: #5a82ff;
+      --accent-soft: #3b6bff1f;
+      --ring: #3b6bff4d;
+      --header-bg: #0b0d16;
+      --header-text: #f4f6fb;
+      --header-text-muted: #7d84a0;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 1px 12px rgba(0,0,0,0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 640px;
-    margin: 48px auto;
-    padding: 0 20px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
     line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
   }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  .subtitle { color: #888; margin-bottom: 24px; font-size: 14px; }
-  .config {
-    display: flex; gap: 8px; margin-bottom: 20px;
+
+  /* ---------- header ---------- */
+  header.topbar {
+    background: var(--header-bg);
+    color: var(--header-text);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
-  .config input {
-    flex: 1; padding: 8px 10px; font-size: 13px;
-    border: 1px solid #999; border-radius: 6px;
-    background: transparent; color: inherit;
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, #3b6bff, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 700; font-size: 15px;
+    flex-shrink: 0;
   }
-  .controls { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-  button {
-    padding: 10px 20px; font-size: 14px; border-radius: 8px;
-    border: none; cursor: pointer; font-weight: 600;
+  .brand-text { display: flex; flex-direction: column; line-height: 1.25; }
+  .brand-text strong { font-size: 14.5px; font-weight: 600; }
+  .brand-text span { font-size: 12px; color: var(--header-text-muted); }
+  .env-badge {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: var(--header-text-muted);
+    border: 1px solid #ffffff22; padding: 5px 10px; border-radius: 999px;
   }
-  button.start { background: #2563eb; color: white; }
-  button.stop { background: #dc2626; color: white; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .status { font-size: 13px; padding: 4px 10px; border-radius: 12px; }
-  .status.disconnected { background: #4443; color: #999; }
-  .status.connecting { background: #f59e0b33; color: #b45309; }
-  .status.connected { background: #16a34a33; color: #15803d; }
-  .status.error { background: #dc262633; color: #b91c1c; }
+  .env-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+
+  /* ---------- layout ---------- */
+  main.shell {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 28px 24px 48px;
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 800px) {
+    main.shell { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+  }
+  .panel-pad { padding: 20px; }
+
+  /* ---------- form fields ---------- */
+  label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .field { margin-bottom: 16px; }
+  .field:last-child { margin-bottom: 0; }
+  input[type="text"], input[type="tel"] {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 14px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface-alt);
+    color: inherit;
+    font-family: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+  }
+  input[type="text"]:focus, input[type="tel"]:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--surface);
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  input.invalid { border-color: var(--danger); }
+  .hint { font-size: 12px; color: var(--text-faint); margin: 6px 2px 0; }
+  .hint.error { color: var(--danger); }
+
+  details.advanced { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+  details.advanced summary {
+    font-size: 12.5px; font-weight: 600; color: var(--text-muted); cursor: pointer;
+    user-select: none; list-style: none; display: flex; align-items: center; gap: 4px;
+  }
+  details.advanced summary::-webkit-details-marker { display: none; }
+  details.advanced summary::before { content: '▸'; font-size: 10px; }
+  details.advanced[open] summary::before { content: '▾'; }
+  details.advanced .field { margin-top: 14px; }
+
+  /* ---------- call panel ---------- */
+  .call-status-row {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin: 18px 0 20px;
+  }
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; padding: 5px 10px 5px 8px;
+    border-radius: 999px;
+  }
+  .status::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+  }
+  .status.disconnected { background: #8888881a; color: var(--text-faint); }
+  .status.connecting { background: #f59e0b26; color: var(--warning); }
+  .status.connected { background: #16a34a26; color: var(--success); }
+  .status.connected::before { animation: pulse 1.4s ease-in-out infinite; }
+  .status.error { background: #dc262626; color: var(--danger); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 currentColor; }
+    50% { opacity: 0.55; }
+  }
+
+  .call-timer {
+    font-variant-numeric: tabular-nums;
+    font-size: 13px; font-weight: 600; color: var(--text-muted);
+  }
+
+  .call-buttons {
+    display: flex; justify-content: center; align-items: center; gap: 22px;
+    margin-bottom: 10px;
+  }
+  .call-btn {
+    width: 60px; height: 60px; border-radius: 50%;
+    border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, transform 0.05s, box-shadow 0.15s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  }
+  .call-btn svg { width: 24px; height: 24px; }
+  .call-btn:active:not(:disabled) { transform: scale(0.94); }
+  .call-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
+  .call-btn--start { background: var(--success); color: white; }
+  .call-btn--start:hover:not(:disabled) { background: #128a3e; }
+  .call-btn--stop { background: var(--danger); color: white; }
+  .call-btn--stop:hover:not(:disabled) { background: var(--danger-hover); }
+
+  .call-btn-labels {
+    display: flex; justify-content: center; gap: 22px;
+    font-size: 12px; color: var(--text-faint); font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .call-btn-labels span { width: 60px; text-align: center; }
+
+  /* ---------- transcript ---------- */
+  .transcript-panel { display: flex; flex-direction: column; min-height: 520px; }
+  .transcript-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .transcript-header .title { font-size: 13.5px; font-weight: 600; }
+  .transcript-header .sub { font-size: 12px; color: var(--text-faint); margin-left: auto; }
   #transcript {
-    border: 1px solid #4444; border-radius: 8px; padding: 16px;
-    height: 340px; overflow-y: auto; font-size: 14px;
+    padding: 20px;
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
   }
-  .line { margin-bottom: 10px; }
-  .line .who { font-weight: 600; margin-right: 6px; }
-  .line.user .who { color: #2563eb; }
-  .line.assistant .who { color: #15803d; }
-  .line.system { color: #888; font-style: italic; font-size: 13px; }
+  #transcript:empty::after {
+    content: 'Start a call and your conversation with Ava will appear here.';
+    color: var(--text-faint); font-size: 13.5px;
+    margin: auto;
+    text-align: center;
+    max-width: 260px;
+  }
+
+  .msg { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 14px; max-width: 100%; }
+  .msg.user { flex-direction: row-reverse; margin-left: auto; }
+  .msg.assistant { margin-right: auto; }
+  .msg .avatar {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+  }
+  .msg.assistant .avatar { background: linear-gradient(135deg, #3b6bff, #8b5cf6); color: #fff; }
+  .msg.user .avatar { background: var(--border); color: var(--text-muted); }
+  .msg .bubble {
+    max-width: 380px;
+    padding: 9px 13px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.45;
+    word-wrap: break-word;
+  }
+  .msg.assistant .bubble { background: var(--surface-alt); border-bottom-left-radius: 4px; }
+  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+
+  .msg.system { justify-content: center; margin: 6px 0 14px; }
+  .msg.system .bubble {
+    background: var(--surface-alt); color: var(--text-faint);
+    font-size: 11.5px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  }
 </style>
 </head>
 <body>
 
-<h1>Ava — Voice Contact Center</h1>
-<p class="subtitle">Talk to Ava about your policy, register a claim, or ask for a human agent.</p>
+<header class="topbar">
+  <div class="brand-mark">A</div>
+  <div class="brand-text">
+    <strong>Ava</strong>
+    <span>AI Voice Contact Center</span>
+  </div>
+  <div class="env-badge"><span class="dot"></span>AI Agent</div>
+</header>
 
-<div class="config">
-  <input id="presignEndpoint" type="text"
-    placeholder="Presigned-URL Lambda endpoint (Function URL or API Gateway URL)">
-</div>
+<main class="shell">
+  <div class="panel panel-pad">
+    <div class="field">
+      <label for="mobileNumber">Caller mobile number</label>
+      <input id="mobileNumber" type="tel" inputmode="tel" autocomplete="tel"
+        placeholder="e.g. +91 98765 43210">
+      <p id="mobileHint" class="hint">Used to look up your policy — no need to say it out loud.</p>
+    </div>
 
-<div class="controls">
-  <button id="startBtn" class="start">Talk to Ava</button>
-  <button id="stopBtn" class="stop" disabled>End Call</button>
-  <span id="status" class="status disconnected">disconnected</span>
-</div>
+    <div class="call-status-row">
+      <span id="status" class="status disconnected">Not connected</span>
+      <span id="callTimer" class="call-timer" hidden>00:00</span>
+    </div>
 
-<div id="transcript"></div>
+    <div class="call-buttons">
+      <button id="startBtn" class="call-btn call-btn--start" title="Talk to Ava" aria-label="Talk to Ava">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+      </button>
+      <button id="stopBtn" class="call-btn call-btn--stop" disabled title="End Call" aria-label="End Call">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c-2.4 0-4.7.38-6.87 1.08a1.6 1.6 0 0 0-1.1 1.71l.36 2.94a1.6 1.6 0 0 0 1.2 1.36c.79.2 1.5.48 2.16.81a1.6 1.6 0 0 0 1.74-.24l1.44-1.27a13 13 0 0 1 2.14 0l1.44 1.27a1.6 1.6 0 0 0 1.74.24c.66-.33 1.37-.6 2.16-.81a1.6 1.6 0 0 0 1.2-1.36l.36-2.94a1.6 1.6 0 0 0-1.1-1.71A22.7 22.7 0 0 0 12 8z"/></svg>
+      </button>
+    </div>
+    <div class="call-btn-labels">
+      <span>Talk</span>
+      <span>End</span>
+    </div>
+
+    <details class="advanced">
+      <summary>Connection settings</summary>
+      <div class="field">
+        <label for="presignEndpoint">Presigned-URL endpoint</label>
+        <input id="presignEndpoint" type="text"
+          placeholder="Function URL or API Gateway URL">
+      </div>
+    </details>
+  </div>
+
+  <div class="panel transcript-panel">
+    <div class="transcript-header">
+      <span class="title">Live Transcript</span>
+      <span class="sub">Real-time speech-to-text</span>
+    </div>
+    <div id="transcript"></div>
+  </div>
+</main>
 
 <script>
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const statusEl = document.getElementById('status');
+const callTimerEl = document.getElementById('callTimer');
 const transcriptEl = document.getElementById('transcript');
 const endpointInput = document.getElementById('presignEndpoint');
+const mobileInput = document.getElementById('mobileNumber');
+const mobileHint = document.getElementById('mobileHint');
+
+const MOBILE_HINT_DEFAULT = mobileHint.textContent;
+const MOBILE_PATTERN = /^\+?[\d\-\s]{7,20}$/;
 
 endpointInput.value = localStorage.getItem('ava_presign_endpoint') || '';
+mobileInput.value = localStorage.getItem('ava_mobile_number') || '';
+
+function validateMobile() {
+  const value = mobileInput.value.trim();
+  if (!value) {
+    mobileInput.classList.remove('invalid');
+    mobileHint.textContent = MOBILE_HINT_DEFAULT;
+    mobileHint.classList.remove('error');
+    return null;
+  }
+  if (!MOBILE_PATTERN.test(value)) {
+    mobileInput.classList.add('invalid');
+    mobileHint.textContent = 'Enter a valid mobile number (digits only, optionally starting with +).';
+    mobileHint.classList.add('error');
+    return false;
+  }
+  mobileInput.classList.remove('invalid');
+  mobileHint.textContent = MOBILE_HINT_DEFAULT;
+  mobileHint.classList.remove('error');
+  return value;
+}
+
+mobileInput.addEventListener('input', validateMobile);
 
 let ws = null;
 let audioCtx = null;
@@ -84,53 +358,78 @@ let scheduledSources = [];
 let micBuffer = [];
 const MIC_CHUNK_SAMPLES = 1600; // ~100ms at 16kHz before sending over the wire
 
+let callTimerInterval = null;
+let callStartedAt = 0;
+
+function startCallTimer() {
+  callStartedAt = Date.now();
+  callTimerEl.hidden = false;
+  callTimerEl.textContent = '00:00';
+  callTimerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - callStartedAt) / 1000);
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
+    callTimerEl.textContent = `${mm}:${ss}`;
+  }, 1000);
+}
+
+function stopCallTimer() {
+  if (callTimerInterval) clearInterval(callTimerInterval);
+  callTimerInterval = null;
+  callTimerEl.hidden = true;
+}
+
 function setStatus(state, text) {
   statusEl.className = `status ${state}`;
   statusEl.textContent = text || state;
 }
 
-function addLine(who, text) {
+function addSystemLine(text) {
   const div = document.createElement('div');
-  div.className = `line ${who}`;
-  if (who === 'system') {
-    div.textContent = text;
-  } else {
-    const label = document.createElement('span');
-    label.className = 'who';
-    label.textContent = who === 'user' ? 'You:' : 'Ava:';
-    div.appendChild(label);
-    div.appendChild(document.createTextNode(text));
-  }
+  div.className = 'msg system';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  div.appendChild(bubble);
   transcriptEl.appendChild(div);
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function makeMessageRow(role) {
+  const row = document.createElement('div');
+  row.className = `msg ${role}`;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  if (role === 'user') {
+    avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 12a4.8 4.8 0 1 0 0-9.6 4.8 4.8 0 0 0 0 9.6zm0 2.4c-4.4 0-8.4 2.24-8.4 5.4v.6c0 .66.54 1.2 1.2 1.2h14.4c.66 0 1.2-.54 1.2-1.2v-.6c0-3.16-4-5.4-8.4-5.4z"/></svg>';
+  } else {
+    avatar.textContent = 'A';
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  transcriptEl.appendChild(row);
+  return bubble;
+}
+
 // bidi_transcript_stream fires once per incremental delta, not once per
-// finished sentence — this tracks one in-progress <div> per role and
-// overwrites its text as deltas arrive, instead of appending a new line for
-// every fragment. is_final closes the line out so the next utterance from
-// that role starts a fresh one.
-const activeStreamLines = { user: null, assistant: null };
+// finished sentence — this tracks one in-progress bubble per role and
+// overwrites its text as deltas arrive, instead of appending a new bubble
+// for every fragment. is_final closes the bubble out so the next utterance
+// from that role starts a fresh one.
+const activeStreamBubbles = { user: null, assistant: null };
 
 function upsertStreamLine(role, text, isFinal) {
-  let entry = activeStreamLines[role];
-  if (!entry) {
-    const div = document.createElement('div');
-    div.className = `line ${role}`;
-    const label = document.createElement('span');
-    label.className = 'who';
-    label.textContent = role === 'user' ? 'You:' : 'Ava:';
-    div.appendChild(label);
-    const textNode = document.createTextNode('');
-    div.appendChild(textNode);
-    transcriptEl.appendChild(div);
-    entry = { div, textNode };
-    activeStreamLines[role] = entry;
+  let bubble = activeStreamBubbles[role];
+  if (!bubble) {
+    bubble = makeMessageRow(role);
+    activeStreamBubbles[role] = bubble;
   }
-  entry.textNode.textContent = text;
+  bubble.textContent = text;
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
   if (isFinal) {
-    activeStreamLines[role] = null;
+    activeStreamBubbles[role] = null;
   }
 }
 
@@ -267,25 +566,42 @@ function stopMic() {
 async function start() {
   const endpoint = endpointInput.value.trim();
   if (!endpoint) {
-    alert('Enter your presigned-URL Lambda endpoint first.');
+    alert('Enter your presigned-URL Lambda endpoint first (see Connection settings).');
     return;
   }
+  const mobileValidation = validateMobile();
+  if (mobileValidation === false) {
+    mobileInput.focus();
+    return;
+  }
+  const mobileNumber = mobileValidation || null;
+
   localStorage.setItem('ava_presign_endpoint', endpoint);
+  if (mobileNumber) {
+    localStorage.setItem('ava_mobile_number', mobileNumber);
+  } else {
+    localStorage.removeItem('ava_mobile_number');
+  }
 
   startBtn.disabled = true;
-  setStatus('connecting', 'getting presigned url…');
+  setStatus('connecting', 'Connecting…');
 
   try {
     const res = await fetch(endpoint);
     if (!res.ok) throw new Error(`Presign request failed: ${res.status}`);
     const { url } = await res.json();
 
-    setStatus('connecting', 'connecting…');
     ws = new WebSocket(url);
 
     ws.onopen = async () => {
-      setStatus('connected', 'connected');
-      addLine('system', 'Connected. Speak into your microphone.');
+      setStatus('connected', 'On call');
+      startCallTimer();
+      // Sent before anything else so the backend can use it to skip asking
+      // for the mobile number verbally — see agentcore_app/strands_agent.py.
+      if (mobileNumber) {
+        ws.send(JSON.stringify({ type: 'bidi_call_metadata', mobile_number: mobileNumber }));
+      }
+      addSystemLine('Connected. Speak into your microphone.');
       stopBtn.disabled = false;
       await startMic();
     };
@@ -313,21 +629,22 @@ async function start() {
     };
 
     ws.onerror = () => {
-      setStatus('error', 'connection error');
-      addLine('system', 'WebSocket error — see browser console.');
+      setStatus('error', 'Connection error');
+      addSystemLine('WebSocket error — see browser console.');
     };
 
     ws.onclose = () => {
-      setStatus('disconnected', 'disconnected');
-      addLine('system', 'Call ended.');
+      setStatus('disconnected', 'Not connected');
+      stopCallTimer();
+      addSystemLine('Call ended.');
       startBtn.disabled = false;
       stopBtn.disabled = true;
       stopMic();
     };
   } catch (err) {
     console.error(err);
-    setStatus('error', 'failed to connect');
-    addLine('system', `Failed to connect: ${err.message}`);
+    setStatus('error', 'Failed to connect');
+    addSystemLine(`Failed to connect: ${err.message}`);
     startBtn.disabled = false;
   }
 }

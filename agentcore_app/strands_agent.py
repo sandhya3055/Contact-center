@@ -613,24 +613,115 @@ _DIGIT_WORDS = {
 _WORD_OR_NUMBER = re.compile(r"[a-zA-Z]+|\d+")
 _PHONE_LIKE_PATTERN = re.compile(r"^\+\d+$")
 
+# Validates the mobile number the UI sends as call metadata (see voice_chat
+# below) — deliberately stricter than a real-world phone number would need
+# to be, since anything that fails this is dropped rather than reaching the
+# model as text.
+_PHONE_LIKE_UI_PATTERN = re.compile(r"^\+?[\d\-\s]{7,20}$")
+
+# Field-name hints for two different flavors of "this argument is an
+# identity/account detail, never a value the model should be inventing" —
+# used by _TranscriptConsistencyGateTool below. Split in two because they
+# need different verification strategies:
+#
+# _DIGIT_SEQUENCE_FIELD_HINTS covers values that are naturally spoken (and,
+# per SYSTEM_INSTRUCTION, read back) as one contiguous run of digits — a
+# mobile number, an account number — so the digits the caller actually said
+# can be checked for a literal substring match against the argument.
+#
+# _DATE_FIELD_HINTS covers a date of birth, which callers say as a natural
+# compound phrase ("the fifteenth of January, nineteen ninety") rather than
+# digit-by-digit, and whose components (day, month, year) don't even appear
+# in the same order they'd be spoken versus how a tool typically wants them
+# (YYYY-MM-DD). A literal digit-substring match structurally cannot verify
+# this — see _mentions_a_number below for the weaker check used instead.
+#
+# Both are matched by substring against the argument's field name, not any
+# specific tool name, so this keeps working if the gateway adds a new tool
+# with a similarly named argument.
+_DIGIT_SEQUENCE_FIELD_HINTS = (
+    "mobile", "phone", "ssn", "aadhaar", "pan", "national_id",
+    "account_number", "card_number", "policy", "vehicle", "registration",
+    "reg_no", "vin",
+)
+_DATE_FIELD_HINTS = ("dob", "birth")
+
+# Minimum digit count (after stripping everything else) for a
+# _DIGIT_SEQUENCE_FIELD_HINTS value to be worth checking for fabrication at
+# all — long enough that a coincidental digit-substring match against
+# unrelated conversation is unlikely.
+_FABRICATION_MIN_DIGITS = 6
+
+# Vocabulary for _mentions_a_number: single-digit words, teens, tens,
+# magnitude words, ordinals (needed since a caller states a day of month as
+# "fifteenth", not "one five"), and month names. Matched token-by-token, not
+# as compound phrases, so "twenty-first" is still caught via its "twenty"
+# and "first" tokens without needing every two-word combination listed.
+_NUMBER_WORD_VOCAB = frozenset(
+    {
+        "zero", "oh", "one", "two", "three", "four", "five", "six", "seven",
+        "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+        "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+        "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        "hundred", "thousand",
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh",
+        "eighth", "ninth", "tenth", "eleventh", "twelfth", "thirteenth",
+        "fourteenth", "fifteenth", "sixteenth", "seventeenth", "eighteenth",
+        "nineteenth", "twentieth", "thirtieth",
+        "january", "february", "march", "april", "may", "june", "july",
+        "august", "september", "october", "november", "december",
+    }
+)
+
+
+def _digits_only(value: str) -> str:
+    return re.sub(r"\D", "", value)
+
+
+def _mentions_a_number(text: str) -> bool:
+    return any(
+        token.isdigit() or token in _NUMBER_WORD_VOCAB
+        for token in _WORD_OR_NUMBER.findall(text.lower())
+    )
+
 
 class _RecentUserDigits:
-    """Tracks digits the caller has actually said recently, this call only,
-    so a phone-number-shaped tool argument can be checked against what was
-    really spoken -- catching Nova Sonic dropping a digit in speech-to-text
-    without assuming any fixed "correct" length (real numbers in this
-    system vary from record to record, so a length constant can't do this
-    safely -- see git history for the attempt that got this wrong).
+    """Tracks what the caller has provided this call, so a tool argument
+    can be checked against what was actually said (or, for a field like the
+    mobile number, typed into the UI before the call connected — see
+    `seed()`) rather than trusted at face value.
 
-    Windowed to the last few non-empty turns rather than the whole call, so
-    an unrelated number mentioned much earlier (an incident date, a claim
-    amount) doesn't stick around and cause a false positive later.
+    Three views are kept for the different checks in
+    _TranscriptConsistencyGateTool:
+
+    - `spoken_digits()`: digits only, windowed to the last few non-empty
+      turns, so an unrelated number mentioned much earlier (an incident
+      date, a claim amount) doesn't stick around and cause a false positive
+      later. Used for the "Nova Sonic dropped a trailing digit in
+      speech-to-text" check, without assuming any fixed "correct" length
+      (real numbers in this system vary from record to record, so a length
+      constant can't do this safely -- see git history for the attempt that
+      got this wrong).
+
+    - `ever_provided_digits()`: digits only, unbounded for the life of the
+      call. Used for the digit-sequence fabrication check ("was this exact
+      run of digits ever provided by the caller, in any form") — that
+      question must not forget something said (or typed) several turns ago
+      just because a narrow recency window rolled past it.
+
+    - `mentions_number_recently()`: not digit-based at all — true if a
+      recent turn contained any number-shaped word (see
+      _mentions_a_number), spoken-compound-number words included. Used for
+      the date-of-birth fabrication check, where digit-substring matching
+      doesn't apply (see _DATE_FIELD_HINTS above).
     """
 
     _WINDOW = 3
 
     def __init__(self) -> None:
         self._recent: list[str] = []
+        self._all: list[str] = []
+        self._recent_text: list[str] = []
 
     def record(self, text: str) -> None:
         digits = "".join(
@@ -640,24 +731,75 @@ class _RecentUserDigits:
         if digits:
             self._recent.append(digits)
             self._recent = self._recent[-self._WINDOW :]
+            self._all.append(digits)
+        self._recent_text.append(text)
+        self._recent_text = self._recent_text[-self._WINDOW :]
+
+    def seed(self, value: str) -> None:
+        """Register digits the caller provided some way other than speech
+        this call — e.g. a mobile number typed into the UI before the call
+        connected (see the call-metadata handshake in voice_chat) — so a
+        tool argument built from it isn't later flagged as fabricated just
+        because it was never spoken aloud."""
+        digits = _digits_only(value)
+        if digits:
+            self._all.append(digits)
 
     def spoken_digits(self) -> str:
         return "".join(self._recent)
 
+    def ever_provided_digits(self) -> str:
+        return "".join(self._all)
+
+    def mentions_number_recently(self) -> bool:
+        return any(_mentions_a_number(text) for text in self._recent_text)
+
 
 class _TranscriptConsistencyGateTool(AgentTool):
-    """Wraps an AgentTool so any argument shaped like a phone number
-    ("+" followed only by digits) is checked against _RecentUserDigits: if
-    it's an exact prefix of what the caller actually said recently (i.e.
-    missing only trailing digits), the call is blocked as a likely Nova
-    Sonic speech-to-text drop, rather than re-run with data that doesn't
-    match what the caller said.
+    """Wraps an AgentTool with two checks against _RecentUserDigits, both
+    aimed at "this argument doesn't actually reflect what the caller
+    provided" but catching different causes:
+
+    1. Any argument shaped like a phone number ("+" followed only by
+       digits) that's an exact prefix of what the caller actually said
+       recently (i.e. missing only trailing digits) is blocked as a likely
+       Nova Sonic speech-to-text drop.
+
+    2. Any argument shaped like a digit-sequence identity field (see
+       _DIGIT_SEQUENCE_FIELD_HINTS — a mobile number, an account number,
+       ...) with enough digits to check (_FABRICATION_MIN_DIGITS) that
+       doesn't appear anywhere in what the caller has said or provided this
+       call at all is blocked as fabricated.
+
+    3. Any argument shaped like a date-of-birth field (see
+       _DATE_FIELD_HINTS) is blocked as fabricated if no recent caller turn
+       mentioned any number-shaped word at all — a weaker check than #2
+       (it can't verify the value matches, only that the caller said
+       *something* number-like), used because a date is naturally spoken as
+       a compound phrase ("the fifteenth of January, nineteen ninety")
+       whose digits don't even appear in the order a tool would want them,
+       so digit-substring matching structurally cannot apply here the way
+       it does for #2.
+
+    Both #2 and #3 catch the model inventing a plausible-looking value
+    instead of asking, which SYSTEM_INSTRUCTION already forbids ("never
+    fabricate...") but nothing previously enforced. Both skip any field
+    name already covered by _GroundingGateTool's grounded_values: that
+    field's provenance is that gate's job, and a value legitimately
+    returned by an earlier lookup was never spoken by the caller either, so
+    it would otherwise look identical to a fabrication here.
     """
 
-    def __init__(self, wrapped: AgentTool, recent_digits: _RecentUserDigits) -> None:
+    def __init__(
+        self,
+        wrapped: AgentTool,
+        recent_digits: _RecentUserDigits,
+        grounded_values: dict[str, set[str]],
+    ) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._recent_digits = recent_digits
+        self._grounded_values = grounded_values
 
     @property
     def tool_name(self) -> str:
@@ -672,10 +814,11 @@ class _TranscriptConsistencyGateTool(AgentTool):
         return self._wrapped.tool_spec
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        arguments = tool_use.get("input") or {}
         spoken = self._recent_digits.spoken_digits()
         truncated_fields = [
             key
-            for key, value in (tool_use.get("input") or {}).items()
+            for key, value in arguments.items()
             if isinstance(value, str)
             and _PHONE_LIKE_PATTERN.match(value)
             and len(spoken) > len(value) - 1
@@ -706,6 +849,42 @@ class _TranscriptConsistencyGateTool(AgentTool):
             )
             return
 
+        ever_provided = self._recent_digits.ever_provided_digits()
+        fabricated_fields = []
+        for key, value in arguments.items():
+            if not isinstance(value, str) or key in self._grounded_values:
+                continue
+            key_lower = key.lower()
+            if any(hint in key_lower for hint in _DATE_FIELD_HINTS):
+                if not self._recent_digits.mentions_number_recently():
+                    fabricated_fields.append(key)
+            elif any(hint in key_lower for hint in _DIGIT_SEQUENCE_FIELD_HINTS):
+                digits = _digits_only(value)
+                if len(digits) >= _FABRICATION_MIN_DIGITS and digits not in ever_provided:
+                    fabricated_fields.append(key)
+        if fabricated_fields:
+            print(
+                f"[fabrication blocked] {tool_use['name']} args {fabricated_fields} were never provided "
+                "by the caller this call, spoken or typed — likely invented"
+            )
+            yield ToolResultEvent(
+                {
+                    "toolUseId": tool_use["toolUseId"],
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                f"Cannot proceed: {', '.join(fabricated_fields)} doesn't match anything "
+                                "the caller has actually said or provided this call. Never invent a value "
+                                "for this — ask the caller for it directly, confirm what they say back to "
+                                "them, and only then call this tool again."
+                            )
+                        }
+                    ],
+                }
+            )
+            return
+
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
             yield event
 
@@ -722,11 +901,12 @@ async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserD
     Every tool is also wrapped with _ToolOutputSanitizerTool (untrusted
     output, G2.18), _GroundingGateTool (argument provenance),
     _IdempotencyGateTool (safe-retry caching, G1.19), _HighValueClaimGateTool
-    (HITL threshold, G4.19), and _TranscriptConsistencyGateTool (catches a
-    digit Nova Sonic dropped in speech-to-text, checked against
-    recent_digits rather than any fixed length) — all scoped to this call's
-    grounded_values/cache/recent_digits, so state never leaks across
-    connections.
+    (HITL threshold, G4.19), and _TranscriptConsistencyGateTool (catches
+    both a digit Nova Sonic dropped in speech-to-text, and an identity-
+    shaped argument — a date of birth, an account number — the model
+    invented rather than one the caller actually provided) — all scoped to
+    this call's grounded_values/cache/recent_digits, so state never leaks
+    across connections.
     """
     call_session_id = str(uuid.uuid4())
     grounded_values: dict[str, set[str]] = {}
@@ -741,7 +921,7 @@ async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserD
         tool = _GroundingGateTool(tool, grounded_values)
         tool = _IdempotencyGateTool(tool)
         tool = _HighValueClaimGateTool(tool)
-        tool = _TranscriptConsistencyGateTool(tool, recent_digits)
+        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values)
         wrapped.append(_LoggingTool(tool))
 
     return wrapped
@@ -802,6 +982,22 @@ async def voice_chat(websocket: WebSocket) -> None:
         await websocket.accept()
         print("WebSocket connection accepted")
 
+        # frontend/index.html sends one JSON metadata message immediately
+        # after the socket opens, before any audio — {"type":
+        # "bidi_call_metadata", "mobile_number": "..."} if the caller typed
+        # their number into the UI, otherwise no mobile_number key. Received
+        # concurrently with the tools/prompt loads below so it doesn't add
+        # latency. A client that never sends it (or sends audio first) just
+        # times out here and the call proceeds exactly as before.
+        async def receive_initial_metadata() -> dict[str, Any]:
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=3.0)
+            except Exception:
+                return {}
+            return message if isinstance(message, dict) and message.get("type") == "bidi_call_metadata" else {}
+
+        metadata_task = asyncio.create_task(receive_initial_metadata())
+
         tools = await tools_task
         system_prompt = await prompt_task
         voice_agent = BidiAgent(
@@ -809,6 +1005,23 @@ async def voice_chat(websocket: WebSocket) -> None:
             tools=[*tools, stop_conversation],
             system_prompt=system_prompt,
         )
+
+        # Only digits/+/space/dash, a plausible phone length: anything else
+        # (including an attempted prompt injection typed into the field —
+        # this reaches the model as literal text below) is dropped, and the
+        # call proceeds exactly as if no number had been provided.
+        initial_metadata = await metadata_task
+        raw_mobile_number = initial_metadata.get("mobile_number")
+        mobile_number = (
+            raw_mobile_number.strip()
+            if isinstance(raw_mobile_number, str) and _PHONE_LIKE_UI_PATTERN.match(raw_mobile_number.strip())
+            else None
+        )
+        # Registered as provided-but-not-spoken so _TranscriptConsistencyGateTool
+        # doesn't flag a later tool call using this number as fabricated just
+        # because the caller typed it instead of saying it aloud.
+        if mobile_number:
+            recent_digits.seed(mobile_number)
 
         # Nova Sonic only speaks in response to a turn it detects — without
         # this nudge Ava sits silently until the caller says something first,
@@ -819,13 +1032,29 @@ async def voice_chat(websocket: WebSocket) -> None:
         # because BidiAgent.send() always marks text input role=USER — the
         # system prompt's own directive to greet first takes priority over
         # reacting to this literal text.
+        #
+        # When the caller already typed their mobile number into the UI,
+        # that text carries no speech-to-text risk (unlike a spoken number),
+        # so this tells Ava to use it straight away instead of asking for it
+        # and reading it back digit by digit, per SYSTEM_INSTRUCTION.
+        if mobile_number:
+            greeting_text = (
+                "(the call has just connected. The caller already entered their "
+                f"mobile number through the app, exactly as typed: {mobile_number}. "
+                "It was not spoken, so there is no speech-to-text risk — treat it "
+                "as already confirmed. Greet the caller in one short sentence and "
+                "look up their policy on this number directly, without asking for "
+                "it or reading it back to confirm — begin now)"
+            )
+        else:
+            greeting_text = "(the call has just connected — begin now)"
         greeted = False
 
         async def receive_with_greeting_kickoff():
             nonlocal greeted
             if not greeted:
                 greeted = True
-                return {"type": "bidi_text_input", "text": "(the call has just connected — begin now)"}
+                return {"type": "bidi_text_input", "text": greeting_text}
             return await websocket.receive_json()
 
         async def log_event(event: dict[str, Any]) -> None:
