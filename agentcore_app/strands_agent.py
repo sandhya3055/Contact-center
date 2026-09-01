@@ -31,6 +31,14 @@ lookup" rule as a runtime check the model cannot reason its way around,
 again detected generically by field name rather than by hardcoding which
 tool this applies to.
 
+Two more generic wrappers sit in the same chain: _ToolOutputSanitizerTool
+neutralizes instruction-like strings in whatever a tool returns (or its
+description), since that content comes from the gateway's backend and
+should be treated as data, never as a directive to the model. And
+_IdempotencyGateTool replays the result of an identical, recent call
+instead of re-invoking the tool, so a dropped acknowledgement or a
+confused retry can't double a side effect like registering a claim.
+
 Local dev:
     python strands_agent.py
     # then, from another terminal:
@@ -40,16 +48,26 @@ Deploy: see DEPLOY.md.
 """
 
 import asyncio
-import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from copy import deepcopy
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import boto3
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+# Local dev only: when running this file directly (`python strands_agent.py`),
+# load the same .env bot.py uses (one directory up) so env vars like
+# MCP_SERVER_URL and BEDROCK_PROMPT_ID are actually set. In the deployed
+# container, AgentCore Runtime injects environment variables directly and
+# there's no .env file present — load_dotenv() is then a harmless no-op.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
 from strands.experimental.bidi import BidiAgent
 from strands.experimental.bidi.models import BidiNovaSonicModel
@@ -65,66 +83,75 @@ MODEL_ID = os.getenv("MODEL_ID", "amazon.nova-2-sonic-v1:0")
 INPUT_SAMPLE_RATE = int(os.getenv("INPUT_SAMPLE_RATE", "16000"))
 OUTPUT_SAMPLE_RATE = int(os.getenv("OUTPUT_SAMPLE_RATE", "16000"))
 
-# PII tokenization for logs only (see _build_pii_redactor below). Nova Sonic
-# is a speech-to-speech model — the caller's own audio already carries their
-# mobile number, and Ava's job this call is to read it and other identifiers
-# back to them, so there's no way to redact these from what reaches the
-# model without breaking the conversation. What IS fully our own and fully
-# fixable is this process's logs (stdout here, CloudWatch via AgentCore
-# Observability once deployed) — _LoggingTool's [tool call]/[tool result]
-# lines used to print raw arguments and results; they're tokenized before
-# logging from here on. The real values still flow to the gateway tool and
-# to Nova Sonic unchanged.
-_SENSITIVE_FIELD_HINTS = (
-    "mobile", "phone", "email", "address", "aadhaar", "pan", "ssn",
-    "national_id", "account_number", "card_number", "dob", "birth",
-    "policy", "vehicle", "registration", "reg_no", "vin",
-)
+# Optional: manage the system prompt in Bedrock Prompt Management instead of
+# the SYSTEM_INSTRUCTION constant below, so editing the prompt in the Bedrock
+# console takes effect on the next call with no redeploy. Unset (the
+# default) keeps using SYSTEM_INSTRUCTION as-is.
+BEDROCK_PROMPT_ID = os.getenv("BEDROCK_PROMPT_ID")
+BEDROCK_PROMPT_VERSION = os.getenv("BEDROCK_PROMPT_VERSION")  # omit for the DRAFT version
 
-_PHONE_PATTERN = re.compile(r"(?<!\w)\+?\d[\d\-\s]{7,14}\d(?!\w)")
+# Untrusted tool output (G2.18): a tool result comes from the gateway's
+# backend, not from the caller or the model — but it's still external input
+# that could be malformed, compromised, or (for a third-party MCP server)
+# actively poisoned with text aimed at the model rather than data for it.
+# Nova Sonic's tool-result API takes a JSON object, not a text block, so the
+# usual "wrap it in delimiters and tell the model it's data" defense doesn't
+# apply structurally here — this instead scans every string value in a
+# tool's result (and description) for instruction-like phrasing and
+# neutralizes it before the model ever sees it. It's a heuristic, not a
+# classifier: cheap insurance against the tool result smuggling a
+# directive, not a guarantee against a determined attacker.
+_INJECTION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"ignore (all|any|the)?\s*(previous|prior|above)\s*instructions",
+        r"disregard (all|any|the)?\s*(previous|prior|above)",
+        r"new (system )?instructions",
+        r"you are now (a|an)",
+        r"system\s*:\s*\S",
+        r"reveal (the|your) (system prompt|instructions)",
+    )
+]
 
 
-def _is_sensitive_field(key: str) -> bool:
-    key_lower = key.lower()
-    return any(hint in key_lower for hint in _SENSITIVE_FIELD_HINTS)
+def _looks_like_injection(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _INJECTION_PATTERNS)
 
 
-def _build_pii_redactor():
-    """Returns a `redact(value)` function for use in log lines only.
+def _sanitize_untrusted(data):
+    """Recursively neutralize instruction-like strings in tool-returned data
+    (or a tool's own description) — see the note above _INJECTION_PATTERNS."""
+    if isinstance(data, dict):
+        return {key: _sanitize_untrusted(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_untrusted(item) for item in data]
+    if isinstance(data, str) and _looks_like_injection(data):
+        print(f"[untrusted-output] neutralized suspicious content: {data[:80]!r}...")
+        return "[content removed: this looked like an embedded instruction, not data]"
+    return data
 
-    Tokens are stable per real value for the life of this call (the same
-    mobile number always logs as the same token), generated by hashing the
-    value — not the sequence it was seen in — so two independent redactors
-    (one per WebSocket connection here) never need to agree on ordering. The
-    token -> real value mapping lives only in this closure's memory: never
-    written to disk, never logged itself, and gone as soon as the call ends.
-    """
 
-    tokens: dict[str, str] = {}
-    reverse: dict[str, str] = {}
+# Client-side half of idempotency (G1.19): if the exact same tool call
+# (same arguments) repeats within this window — a dropped acknowledgement,
+# a confused retry — the first call's result is replayed instead of
+# executing the action again. Bounded by time rather than kept for the
+# whole call so a genuinely new, later call with coincidentally identical
+# arguments (e.g. re-checking status) still gets a fresh execution rather
+# than being served stale data forever. This is the client's contribution;
+# true dedup still depends on the gateway tool itself being safe to retry.
+IDEMPOTENCY_WINDOW_SECONDS = 30
 
-    def tokenize(value: str) -> str:
-        token = tokens.get(value)
-        if token is None:
-            digest = hashlib.sha256(value.encode()).hexdigest()[:8]
-            token = f"[PII_{digest}]"
-            tokens[value] = token
-            reverse[token] = value
-        return token
-
-    def redact(data):
-        if isinstance(data, dict):
-            return {
-                key: tokenize(str(value)) if _is_sensitive_field(key) and value is not None else redact(value)
-                for key, value in data.items()
-            }
-        if isinstance(data, list):
-            return [redact(item) for item in data]
-        if isinstance(data, str):
-            return _PHONE_PATTERN.sub(lambda m: tokenize(m.group(0)), data)
-        return data
-
-    return redact
+# Human-in-the-loop threshold (G4.19): a claim at or above this estimated
+# cost must not be registered autonomously, however confident Ava is —
+# confirmed with the team as the business threshold. Detected generically
+# by the presence of HIGH_VALUE_CLAIM_FIELD in a call's arguments, not by
+# hardcoding a tool name, so this keeps working if the gateway renames or
+# adds a second tool that also takes an estimated_cost. SYSTEM_INSTRUCTION
+# also tells Ava about the threshold so she can set expectations with the
+# caller before even attempting the call, but _HighValueClaimGateTool below
+# is what makes it non-negotiable regardless of what the model decides.
+HIGH_VALUE_CLAIM_FIELD = "estimated_cost"
+HIGH_VALUE_CLAIM_THRESHOLD = 100_000
 
 
 SYSTEM_INSTRUCTION = """
@@ -188,6 +215,12 @@ one already exists — found only at that point, after you've already asked
 for details — stop there: don't ask the caller to repeat anything, just
 tell them what's already on file.
 
+If a claim's estimated cost is ₹1,00,000 or more, you cannot register it
+yourself no matter how straightforward it seems — tell the caller a
+specialist needs to review a claim of that size, and escalate them to a
+human agent with the details you've already gathered, the same way you
+would for any other escalation.
+
 Use your judgment on when to escalate to a human agent: the caller directly
 asks for a person, their request is outside what your tools can help with,
 a tool keeps failing, or the caller sounds frustrated or unsatisfied after
@@ -201,23 +234,61 @@ Never fabricate policy, claim, or account information. If you're unsure what
 the caller means, ask a clarifying question rather than guessing.
 """.strip()
 
+_bedrock_agent_client = boto3.client("bedrock-agent", region_name=BEDROCK_REGION) if BEDROCK_PROMPT_ID else None
+
+
+def _fetch_prompt_template() -> str:
+    """Fetch the current text of a Bedrock Prompt Management prompt (blocking
+    boto3 call — always run through asyncio.to_thread, never awaited directly).
+
+    A prompt can have several named variants; this picks whichever one is
+    marked as the default rather than assuming there's only one.
+    """
+    kwargs = {"promptIdentifier": BEDROCK_PROMPT_ID}
+    if BEDROCK_PROMPT_VERSION:
+        kwargs["promptVersion"] = BEDROCK_PROMPT_VERSION
+    response = _bedrock_agent_client.get_prompt(**kwargs)
+
+    variants = response.get("variants") or []
+    if not variants:
+        raise RuntimeError(f"prompt {BEDROCK_PROMPT_ID!r} has no variants")
+    default_variant_name = response.get("defaultVariant")
+    variant = next((v for v in variants if v["name"] == default_variant_name), variants[0])
+
+    return variant["templateConfiguration"]["text"]["text"]
+
+
+async def get_system_prompt() -> str:
+    """The system prompt for this call: fetched fresh from Bedrock Prompt
+    Management if BEDROCK_PROMPT_ID is set, else the SYSTEM_INSTRUCTION
+    constant above. Fetched once per WebSocket connection (like gateway
+    tools) so an edit in the Bedrock console is live on the next call.
+
+    Falls back to SYSTEM_INSTRUCTION on fetch failure (missing permission,
+    deleted prompt, throttling) rather than failing the whole call — a
+    stale-but-working prompt beats no call connecting at all.
+    """
+    if not BEDROCK_PROMPT_ID:
+        print("[prompt] BEDROCK_PROMPT_ID not set — using the hardcoded SYSTEM_INSTRUCTION")
+        return SYSTEM_INSTRUCTION
+    try:
+        text = await asyncio.to_thread(_fetch_prompt_template)
+        version_label = BEDROCK_PROMPT_VERSION or "DRAFT"
+        print(f"[prompt] using {BEDROCK_PROMPT_ID!r} version={version_label} ({len(text)} chars) from Bedrock Prompt Management")
+        return text
+    except Exception as e:
+        print(f"[prompt] failed to fetch {BEDROCK_PROMPT_ID!r} from Bedrock Prompt Management, falling back to SYSTEM_INSTRUCTION: {e}")
+        return SYSTEM_INSTRUCTION
+
 
 class _LoggingTool(AgentTool):
     """Wraps any AgentTool to print its call and result — useful visibility
     into what Ava actually did, without touching the wrapped tool's schema
-    or behavior at all.
+    or behavior at all."""
 
-    What gets printed is passed through redact_for_log first (see
-    _build_pii_redactor) — the printed line never carries a real mobile
-    number, policy id, or vehicle registration, only a stable token. This
-    only affects the print statements below; the wrapped tool still executes
-    with, and yields, the real values.
-    """
-
-    def __init__(self, wrapped: AgentTool, redact_for_log) -> None:
+    def __init__(self, wrapped: AgentTool) -> None:
         super().__init__()
         self._wrapped = wrapped
-        self._redact_for_log = redact_for_log
 
     @property
     def tool_name(self) -> str:
@@ -232,12 +303,12 @@ class _LoggingTool(AgentTool):
         return self._wrapped.tool_spec
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
-        print(f"[tool call] {tool_use['name']}({self._redact_for_log(tool_use.get('input'))})")
+        print(f"[tool call] {tool_use['name']}({tool_use.get('input')})")
         result = None
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
             result = event
             yield event
-        print(f"[tool result] {tool_use['name']} -> {self._redact_for_log(result)}")
+        print(f"[tool result] {tool_use['name']} -> {result}")
 
 
 class _FixedArgumentTool(AgentTool):
@@ -379,7 +450,267 @@ class _GroundingGateTool(AgentTool):
                         self._grounded_values.setdefault(key, set()).add(str(value))
 
 
-async def build_gateway_tools(mcp_client: MCPClient) -> list[AgentTool]:
+class _ToolOutputSanitizerTool(AgentTool):
+    """Wraps an AgentTool so its result is passed through _sanitize_untrusted
+    before anything downstream (grounding, idempotency caching, logging, or
+    the model itself) ever sees it — see the note above _INJECTION_PATTERNS
+    for why this exists and what it can and can't catch.
+
+    Wrapped as close to the real tool as reasonably possible (right after
+    _FixedArgumentTool) so every other wrapper in the chain — including the
+    grounding gate's own record of "values a lookup actually returned" —
+    only ever operates on already-sanitized content.
+    """
+
+    def __init__(self, wrapped: AgentTool) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        spec = deepcopy(self._wrapped.tool_spec)
+        if "description" in spec:
+            spec["description"] = _sanitize_untrusted(spec["description"])
+        return spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            if isinstance(event, ToolResultEvent):
+                event = ToolResultEvent(_sanitize_untrusted(event.tool_result), exception=event.exception)
+            yield event
+
+
+class _IdempotencyGateTool(AgentTool):
+    """Wraps an AgentTool so an exact repeat of the same arguments within
+    IDEMPOTENCY_WINDOW_SECONDS replays the first call's result instead of
+    executing the tool again — the client-side half of G1.19. Wrapped
+    outside _GroundingGateTool: a cache hit skips grounding and the real
+    call entirely, since the cached result already passed both once.
+
+    The cache lives only in this wrapper's own memory, scoped to one
+    WebSocket connection (see build_gateway_tools) and bounded by time
+    rather than kept for the whole call, so a genuinely new, later call
+    with coincidentally identical arguments (e.g. re-checking status) still
+    gets a fresh execution rather than being served stale data forever.
+    """
+
+    def __init__(self, wrapped: AgentTool) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._cache: dict[str, tuple[float, ToolResult]] = {}
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        cache_key = json.dumps(tool_use.get("input") or {}, sort_keys=True, default=str)
+        cached = self._cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < IDEMPOTENCY_WINDOW_SECONDS:
+            age, cached_result = cached
+            print(
+                f"[idempotency] {tool_use['name']} — repeat of a call from {now - age:.1f}s ago, "
+                "returning its cached result instead of re-executing"
+            )
+            yield ToolResultEvent({**cached_result, "toolUseId": tool_use["toolUseId"]})
+            return
+
+        result_event = None
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            result_event = event
+            yield event
+
+        if isinstance(result_event, ToolResultEvent):
+            self._cache[cache_key] = (now, result_event.tool_result)
+
+
+class _HighValueClaimGateTool(AgentTool):
+    """Wraps an AgentTool so a call whose HIGH_VALUE_CLAIM_FIELD argument
+    meets or exceeds HIGH_VALUE_CLAIM_THRESHOLD is blocked before it
+    executes — the tool never fires, and the model gets back a structured
+    result telling it to escalate to a human instead.
+
+    Detected generically by the presence of that field in the call's
+    arguments, not by hardcoding a specific tool name, so this keeps
+    working if the gateway renames the claim tool or adds a second one that
+    also takes an estimated_cost. This is the enforcement half of G4.19 —
+    SYSTEM_INSTRUCTION also tells Ava about the threshold so she can set
+    expectations with the caller before even attempting the call, but this
+    gate is what makes it non-negotiable regardless of what the model
+    decides. Checked first, before idempotency or grounding, since a call
+    this policy rejects should never reach — or be cached by — either.
+    """
+
+    def __init__(self, wrapped: AgentTool) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        arguments = tool_use.get("input") or {}
+        cost = arguments.get(HIGH_VALUE_CLAIM_FIELD)
+        if isinstance(cost, (int, float)) and cost >= HIGH_VALUE_CLAIM_THRESHOLD:
+            print(
+                f"[hitl required] {tool_use['name']} blocked — "
+                f"{HIGH_VALUE_CLAIM_FIELD}={cost} >= {HIGH_VALUE_CLAIM_THRESHOLD}"
+            )
+            yield ToolResultEvent(
+                {
+                    "toolUseId": tool_use["toolUseId"],
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                f"Cannot register this claim automatically: its {HIGH_VALUE_CLAIM_FIELD} "
+                                f"({cost}) is at or above the {HIGH_VALUE_CLAIM_THRESHOLD} threshold that "
+                                "requires human approval. Do not retry this call. Tell the caller a "
+                                "specialist needs to review a claim of this size, and escalate them to a "
+                                "human agent with the claim details you've already gathered."
+                            )
+                        }
+                    ],
+                }
+            )
+            return
+
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            yield event
+
+
+_DIGIT_WORDS = {
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3",
+    "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
+    "nine": "9",
+}
+_WORD_OR_NUMBER = re.compile(r"[a-zA-Z]+|\d+")
+_PHONE_LIKE_PATTERN = re.compile(r"^\+\d+$")
+
+
+class _RecentUserDigits:
+    """Tracks digits the caller has actually said recently, this call only,
+    so a phone-number-shaped tool argument can be checked against what was
+    really spoken -- catching Nova Sonic dropping a digit in speech-to-text
+    without assuming any fixed "correct" length (real numbers in this
+    system vary from record to record, so a length constant can't do this
+    safely -- see git history for the attempt that got this wrong).
+
+    Windowed to the last few non-empty turns rather than the whole call, so
+    an unrelated number mentioned much earlier (an incident date, a claim
+    amount) doesn't stick around and cause a false positive later.
+    """
+
+    _WINDOW = 3
+
+    def __init__(self) -> None:
+        self._recent: list[str] = []
+
+    def record(self, text: str) -> None:
+        digits = "".join(
+            _DIGIT_WORDS.get(token, token if token.isdigit() else "")
+            for token in _WORD_OR_NUMBER.findall(text.lower())
+        )
+        if digits:
+            self._recent.append(digits)
+            self._recent = self._recent[-self._WINDOW :]
+
+    def spoken_digits(self) -> str:
+        return "".join(self._recent)
+
+
+class _TranscriptConsistencyGateTool(AgentTool):
+    """Wraps an AgentTool so any argument shaped like a phone number
+    ("+" followed only by digits) is checked against _RecentUserDigits: if
+    it's an exact prefix of what the caller actually said recently (i.e.
+    missing only trailing digits), the call is blocked as a likely Nova
+    Sonic speech-to-text drop, rather than re-run with data that doesn't
+    match what the caller said.
+    """
+
+    def __init__(self, wrapped: AgentTool, recent_digits: _RecentUserDigits) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._recent_digits = recent_digits
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        spoken = self._recent_digits.spoken_digits()
+        truncated_fields = [
+            key
+            for key, value in (tool_use.get("input") or {}).items()
+            if isinstance(value, str)
+            and _PHONE_LIKE_PATTERN.match(value)
+            and len(spoken) > len(value) - 1
+            and spoken.startswith(value[1:])
+        ]
+        if truncated_fields:
+            print(
+                f"[transcript mismatch] {tool_use['name']} args {truncated_fields} are a truncated "
+                f"prefix of what the caller actually said ({spoken!r}) — likely a dropped digit"
+            )
+            yield ToolResultEvent(
+                {
+                    "toolUseId": tool_use["toolUseId"],
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                f"The number in {', '.join(truncated_fields)} doesn't match what the "
+                                "caller actually said — you're missing one or more trailing digits they "
+                                "spoke. Do not retry with this same number. Read the number back to the "
+                                "caller one digit at a time, ask them to confirm the digit count is "
+                                "right, and get an explicit yes on the corrected number before calling "
+                                "this tool again."
+                            )
+                        }
+                    ],
+                }
+            )
+            return
+
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            yield event
+
+
+async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserDigits) -> list[AgentTool]:
     """Load every tool the gateway currently exposes, unmodified.
 
     No tool name, parameter list, or description is hardcoded here — change
@@ -387,10 +718,18 @@ async def build_gateway_tools(mcp_client: MCPClient) -> list[AgentTool]:
     The single exception: any tool that requires a session_id gets one
     generated fresh for this call injected in (see _FixedArgumentTool),
     since that's plumbing, not something the model should invent.
+
+    Every tool is also wrapped with _ToolOutputSanitizerTool (untrusted
+    output, G2.18), _GroundingGateTool (argument provenance),
+    _IdempotencyGateTool (safe-retry caching, G1.19), _HighValueClaimGateTool
+    (HITL threshold, G4.19), and _TranscriptConsistencyGateTool (catches a
+    digit Nova Sonic dropped in speech-to-text, checked against
+    recent_digits rather than any fixed length) — all scoped to this call's
+    grounded_values/cache/recent_digits, so state never leaks across
+    connections.
     """
     call_session_id = str(uuid.uuid4())
     grounded_values: dict[str, set[str]] = {}
-    redact_for_log = _build_pii_redactor()
     all_tools = await mcp_client.load_tools()
     print(f"[gateway] tools discovered: {[t.tool_name for t in all_tools]}")
 
@@ -398,8 +737,12 @@ async def build_gateway_tools(mcp_client: MCPClient) -> list[AgentTool]:
     for tool in all_tools:
         if _requires_argument(tool, "session_id"):
             tool = _FixedArgumentTool(tool, session_id=call_session_id)
+        tool = _ToolOutputSanitizerTool(tool)
         tool = _GroundingGateTool(tool, grounded_values)
-        wrapped.append(_LoggingTool(tool, redact_for_log))
+        tool = _IdempotencyGateTool(tool)
+        tool = _HighValueClaimGateTool(tool)
+        tool = _TranscriptConsistencyGateTool(tool, recent_digits)
+        wrapped.append(_LoggingTool(tool))
 
     return wrapped
 
@@ -453,15 +796,18 @@ async def voice_chat(websocket: WebSocket) -> None:
         # of sequentially — the gateway round-trip otherwise added its full
         # latency on top of accept() before the caller's mic could even
         # start streaming.
-        tools_task = asyncio.create_task(build_gateway_tools(mcp_client))
+        recent_digits = _RecentUserDigits()
+        tools_task = asyncio.create_task(build_gateway_tools(mcp_client, recent_digits))
+        prompt_task = asyncio.create_task(get_system_prompt())
         await websocket.accept()
         print("WebSocket connection accepted")
 
         tools = await tools_task
+        system_prompt = await prompt_task
         voice_agent = BidiAgent(
             model=sonic_model,
             tools=[*tools, stop_conversation],
-            system_prompt=SYSTEM_INSTRUCTION,
+            system_prompt=system_prompt,
         )
 
         # Nova Sonic only speaks in response to a turn it detects — without
@@ -489,6 +835,8 @@ async def voice_chat(websocket: WebSocket) -> None:
                 text = event.get("current_transcript") or event.get("text")
                 if text and "the call has just connected" not in text:
                     print(f"{who}: {text}")
+                    if event.get("role") == "user":
+                        recent_digits.record(text)
             elif event_type == "bidi_interruption":
                 print(f"[interruption] {event.get('reason')}")
 

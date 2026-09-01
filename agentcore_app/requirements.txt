@@ -2,6 +2,8 @@ strands-agents[bidi-all]    # Bidirectional voice agent framework (BidiAgent + N
 mcp-proxy-for-aws==1.6.4    # aws_iam_streamablehttp_client — signs gateway MCP requests with SigV4
 fastapi                     # Web framework
 uvicorn[standard]           # ASGI server (includes websockets)
+boto3                       # bedrock-agent client, for optional Bedrock Prompt Management fetch
+python-dotenv               # loads ../.env for local dev only (no-op in the deployed container)
 pyaudio==0.2.14             # Audio I/O (required by BidiAgent even though this container has no mic/speakers).
                             # Pinned: 0.2.14 is the version already verified to build cleanly (used by
                             # bot.py's own venv); an unpinned resolve can land on the older 0.2.13, which

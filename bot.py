@@ -31,7 +31,9 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
+from typing import Any
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -128,6 +130,70 @@ def _build_pii_redactor():
     return redact
 
 
+# Untrusted tool output (G2.18): a tool result comes from the gateway's
+# backend, not from the caller or the model — but it's still external input
+# that could be malformed, compromised, or (for a third-party MCP server)
+# actively poisoned with text aimed at the model rather than data for it.
+# Nova Sonic's tool-result API takes a JSON object, not a text block, so the
+# usual "wrap it in delimiters and tell the model it's data" defense doesn't
+# apply structurally here — this instead scans every string value in a
+# parsed tool result for instruction-like phrasing and neutralizes it before
+# it ever reaches original_callback (i.e. before Nova Sonic sees it). It's a
+# heuristic, not a classifier: cheap insurance against the tool result
+# smuggling a directive, not a guarantee against a determined attacker.
+_INJECTION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"ignore (all|any|the)?\s*(previous|prior|above)\s*instructions",
+        r"disregard (all|any|the)?\s*(previous|prior|above)",
+        r"new (system )?instructions",
+        r"you are now (a|an)",
+        r"system\s*:\s*\S",
+        r"reveal (the|your) (system prompt|instructions)",
+    )
+]
+
+
+def _looks_like_injection(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _INJECTION_PATTERNS)
+
+
+def _sanitize_untrusted(data):
+    """Recursively neutralize instruction-like strings in tool-returned data
+    (or a tool's own description) — see the note above _INJECTION_PATTERNS."""
+    if isinstance(data, dict):
+        return {key: _sanitize_untrusted(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_untrusted(item) for item in data]
+    if isinstance(data, str) and _looks_like_injection(data):
+        logger.warning(f"[untrusted-output] neutralized suspicious content: {data[:80]!r}...")
+        return "[content removed: this looked like an embedded instruction, not data]"
+    return data
+
+
+# Client-side half of idempotency (G1.19): if the exact same tool call
+# (same arguments) repeats within this window — a dropped acknowledgement,
+# a confused retry — the first call's result is replayed instead of
+# executing the action again. Bounded by time rather than kept for the
+# whole call so a genuinely new, later call with coincidentally identical
+# arguments (e.g. re-checking status) still gets a fresh execution rather
+# than being served stale data forever. This is the client's contribution;
+# true dedup still depends on the gateway tool itself being safe to retry.
+IDEMPOTENCY_WINDOW_SECONDS = 30
+
+# Human-in-the-loop threshold (G4.19): a claim at or above this estimated
+# cost must not be registered autonomously, however confident Ava is —
+# confirmed with the team as the business threshold. Detected generically
+# by the presence of HIGH_VALUE_CLAIM_FIELD in a call's arguments, not by
+# hardcoding a tool name, so this keeps working if the gateway renames or
+# adds a second tool that also takes an estimated_cost. SYSTEM_INSTRUCTION
+# also tells Ava about the threshold so she can set expectations with the
+# caller before even attempting the call, but this check below is what
+# makes it non-negotiable regardless of what the model decides.
+HIGH_VALUE_CLAIM_FIELD = "estimated_cost"
+HIGH_VALUE_CLAIM_THRESHOLD = 100_000
+
+
 SYSTEM_INSTRUCTION = """
 You are Ava, the AI assistant for the contact center. You speak with callers
 over voice, so keep every response short, natural, and conversational — a
@@ -189,6 +255,12 @@ one already exists — found only at that point, after you've already asked
 for details — stop there: don't ask the caller to repeat anything, just
 tell them what's already on file.
 
+If a claim's estimated cost is ₹1,00,000 or more, you cannot register it
+yourself no matter how straightforward it seems — tell the caller a
+specialist needs to review a claim of that size, and escalate them to a
+human agent with the details you've already gathered, the same way you
+would for any other escalation.
+
 Use your judgment on when to escalate to a human agent: the caller directly
 asks for a person, their request is outside what your tools can help with,
 a tool keeps failing, or the caller sounds frustrated or unsatisfied after
@@ -247,6 +319,24 @@ def _instrument_tools(tools: ToolsSchema) -> ToolsSchema:
     mobile number, policy id, or vehicle registration, only a stable token.
     Only the log lines are affected; original_callback/original_handler
     below always receive the real, unredacted values.
+
+    Two more things happen per tool call, each scoped to its own tool (a
+    fresh idempotency_cache per with_instrumentation call, i.e. per tool):
+
+    5. Idempotency (G1.19) — an exact repeat of the same arguments within
+       IDEMPOTENCY_WINDOW_SECONDS returns the first call's result instead of
+       invoking the tool again, so a dropped acknowledgement or a confused
+       retry can't double a side effect like registering a claim.
+    6. Untrusted output (G2.18) — every tool result is passed through
+       _sanitize_untrusted before grounding, caching, logging, or reaching
+       Nova Sonic, so a malformed or compromised gateway response can't
+       smuggle an instruction into the conversation as if it were data.
+    7. High-value HITL gate (G4.19) — a call whose HIGH_VALUE_CLAIM_FIELD
+       argument meets or exceeds HIGH_VALUE_CLAIM_THRESHOLD is blocked
+       before it executes; the model gets back a structured result telling
+       it to escalate to a human instead. This is checked first, before
+       idempotency or grounding, since a call this policy rejects should
+       never reach — or be cached by — either of those.
     """
 
     grounded_values: dict[str, set[str]] = {}
@@ -254,8 +344,40 @@ def _instrument_tools(tools: ToolsSchema) -> ToolsSchema:
 
     def with_instrumentation(schema, original_handler):
         needs_session_id = "session_id" in schema.required
+        idempotency_cache: dict[str, tuple[float, Any]] = {}
 
         async def wrapped(params):
+            cost = params.arguments.get(HIGH_VALUE_CLAIM_FIELD)
+            if isinstance(cost, (int, float)) and cost >= HIGH_VALUE_CLAIM_THRESHOLD:
+                logger.warning(
+                    f"[hitl required] {params.function_name} blocked — "
+                    f"{HIGH_VALUE_CLAIM_FIELD}={cost} >= {HIGH_VALUE_CLAIM_THRESHOLD}"
+                )
+                await params.result_callback(
+                    {
+                        "error": "human_approval_required",
+                        "message": (
+                            f"Cannot register this claim automatically: its {HIGH_VALUE_CLAIM_FIELD} "
+                            f"({cost}) is at or above the {HIGH_VALUE_CLAIM_THRESHOLD} threshold that "
+                            "requires human approval. Do not retry this call. Tell the caller a "
+                            "specialist needs to review a claim of this size, and escalate them to a "
+                            "human agent with the claim details you've already gathered."
+                        ),
+                    }
+                )
+                return
+
+            cache_key = json.dumps(params.arguments, sort_keys=True, default=str)
+            cached = idempotency_cache.get(cache_key)
+            now = time.monotonic()
+            if cached is not None and now - cached[0] < IDEMPOTENCY_WINDOW_SECONDS:
+                logger.info(
+                    f"[idempotency] {params.function_name} — repeat of a call from "
+                    f"{now - cached[0]:.1f}s ago, returning its cached result instead of re-executing"
+                )
+                await params.result_callback(cached[1])
+                return
+
             ungrounded = [
                 key
                 for key, value in params.arguments.items()
@@ -290,10 +412,12 @@ def _instrument_tools(tools: ToolsSchema) -> ToolsSchema:
                         result = json.loads(result)
                     except (json.JSONDecodeError, TypeError):
                         pass
+                result = _sanitize_untrusted(result)
                 if isinstance(result, dict):
                     for key, value in result.items():
                         if isinstance(value, (str, int, float)):
                             grounded_values.setdefault(key, set()).add(str(value))
+                idempotency_cache[cache_key] = (now, result)
                 logger.info(f"[tool result] {params.function_name} -> {redact_for_log(result)}")
                 await original_callback(result, **kwargs)
 
@@ -306,7 +430,7 @@ def _instrument_tools(tools: ToolsSchema) -> ToolsSchema:
         standard_tools=[
             FunctionSchema(
                 name=schema.name,
-                description=schema.description,
+                description=_sanitize_untrusted(schema.description),
                 properties={k: v for k, v in schema.properties.items() if k != "session_id"},
                 required=[r for r in schema.required if r != "session_id"],
                 handler=with_instrumentation(schema, schema.handler),

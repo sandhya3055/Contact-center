@@ -1,0 +1,844 @@
+<title>Ava Alignment Scorecard</title>
+<style>
+  :root {
+    --paper: #F4F5F8;
+    --surface: #FFFFFF;
+    --surface-2: #EBEEF3;
+    --ink: #12151C;
+    --ink-soft: #3C4250;
+    --muted: #656D7D;
+    --line: #DCE0E8;
+    --line-strong: #C3C9D5;
+    --accent: #24437A;
+    --accent-soft: #E7EDF7;
+    --good: #1E7A52;
+    --good-bg: #E4F3EC;
+    --good-line: #BEE2D1;
+    --warn: #93650A;
+    --warn-bg: #FBF0DA;
+    --warn-line: #EFD79B;
+    --risk: #A5332A;
+    --risk-bg: #FAE7E4;
+    --risk-line: #EFC0BA;
+    --na: #656D7D;
+    --na-bg: #EAECF0;
+
+    --font-display: 'Public Sans', 'Segoe UI', system-ui, sans-serif;
+    --font-body: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+    --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0E1116;
+      --surface: #161A22;
+      --surface-2: #1D222C;
+      --ink: #E7EAF0;
+      --ink-soft: #B7BEC9;
+      --muted: #8891A0;
+      --line: #262C38;
+      --line-strong: #333B49;
+      --accent: #7FA6E0;
+      --accent-soft: #1B2740;
+      --good: #4FBE8C;
+      --good-bg: #12281F;
+      --good-line: #204A38;
+      --warn: #E0AC46;
+      --warn-bg: #2E2410;
+      --warn-line: #4D3B14;
+      --risk: #E37A6D;
+      --risk-bg: #34140F;
+      --risk-line: #55211A;
+      --na: #8891A0;
+      --na-bg: #1D222C;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0E1116;
+    --surface: #161A22;
+    --surface-2: #1D222C;
+    --ink: #E7EAF0;
+    --ink-soft: #B7BEC9;
+    --muted: #8891A0;
+    --line: #262C38;
+    --line-strong: #333B49;
+    --accent: #7FA6E0;
+    --accent-soft: #1B2740;
+    --good: #4FBE8C;
+    --good-bg: #12281F;
+    --good-line: #204A38;
+    --warn: #E0AC46;
+    --warn-bg: #2E2410;
+    --warn-line: #4D3B14;
+    --risk: #E37A6D;
+    --risk-bg: #34140F;
+    --risk-line: #55211A;
+    --na: #8891A0;
+    --na-bg: #1D222C;
+  }
+
+  * { box-sizing: border-box; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  html { background: var(--paper); }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 0 20px 96px;
+  }
+
+  a { color: var(--accent); }
+  a:focus-visible, summary:focus-visible, details:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  .letterhead {
+    height: 4px;
+    background: var(--accent);
+    margin: 0 -20px 0;
+  }
+
+  .page {
+    max-width: 860px;
+    margin: 0 auto;
+  }
+
+  /* ---------- Header ---------- */
+
+  header.masthead {
+    padding: 48px 0 32px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+
+  h1.title {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: clamp(30px, 5vw, 42px);
+    line-height: 1.08;
+    letter-spacing: -0.01em;
+    margin: 0 0 12px;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+
+  .meta-line {
+    font-family: var(--font-display);
+    font-size: 14px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin: 0;
+  }
+
+  .meta-line span:not(:last-child)::after {
+    content: "·";
+    margin-left: 10px;
+    color: var(--line-strong);
+  }
+
+  /* ---------- Verdict banner ---------- */
+
+  .verdict {
+    margin-top: 28px;
+    padding: 22px 24px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 6px;
+  }
+
+  .verdict-label {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin: 0 0 8px;
+  }
+
+  .verdict p {
+    margin: 0;
+    font-size: 17px;
+    color: var(--ink-soft);
+    max-width: 62ch;
+  }
+
+  .stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .stat .n {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+    font-size: 26px;
+    color: var(--ink);
+  }
+
+  .stat .l {
+    font-family: var(--font-display);
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* ---------- Section headings ---------- */
+
+  h2.section-head {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 56px 0 18px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* ---------- Overview grid ---------- */
+
+  .overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px;
+  }
+
+  .chip {
+    display: block;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 15px;
+    text-decoration: none;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .chip:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-1px);
+  }
+
+  .chip-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .chip-tag {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .chip-title {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14.5px;
+    color: var(--ink);
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+
+  .chip-take {
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  /* ---------- Pills ---------- */
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    padding: 3px 9px 3px 7px;
+    border-radius: 100px;
+    white-space: nowrap;
+  }
+
+  .pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .pill--good { background: var(--good-bg); color: var(--good); border: 1px solid var(--good-line); }
+  .pill--good .dot { background: var(--good); }
+  .pill--warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-line); }
+  .pill--warn .dot { background: var(--warn); }
+  .pill--risk { background: var(--risk-bg); color: var(--risk); border: 1px solid var(--risk-line); }
+  .pill--risk .dot { background: var(--risk); }
+  .pill--na { background: var(--na-bg); color: var(--na); border: 1px solid var(--line-strong); }
+  .pill--na .dot { background: var(--na); }
+
+  /* ---------- Topic detail cards ---------- */
+
+  .topic {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 14px;
+    scroll-margin-top: 20px;
+  }
+
+  .topic > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 18px 22px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+
+  .topic > summary::-webkit-details-marker { display: none; }
+
+  .topic > summary::after {
+    content: "";
+    width: 9px;
+    height: 9px;
+    border-right: 1.6px solid var(--muted);
+    border-bottom: 1.6px solid var(--muted);
+    transform: rotate(-45deg);
+    margin-left: auto;
+    transition: transform 0.15s ease;
+  }
+
+  .topic[open] > summary::after { transform: rotate(45deg); }
+
+  .topic-num {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--muted);
+    flex: none;
+  }
+
+  .topic-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 16.5px;
+    color: var(--ink);
+    margin: 0;
+    flex: 1 1 220px;
+  }
+
+  .topic-body {
+    padding: 0 22px 26px;
+    border-top: 1px solid var(--line);
+  }
+
+  .topic-verdict {
+    font-family: var(--font-body);
+    font-size: 16px;
+    color: var(--ink-soft);
+    max-width: 66ch;
+    margin: 18px 0 22px;
+  }
+
+  h3.subhead {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 10px;
+  }
+
+  h3.subhead.good { color: var(--good); }
+  h3.subhead.risk { color: var(--risk); }
+
+  ul.finding-list {
+    list-style: none;
+    margin: 0 0 24px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  ul.finding-list:last-child { margin-bottom: 4px; }
+
+  .finding {
+    border-left: 3px solid var(--good-line);
+    background: var(--surface-2);
+    border-radius: 0 5px 5px 0;
+    padding: 10px 14px;
+    font-family: var(--font-display);
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+
+  .finding.is-risk { border-left-color: var(--risk-line); }
+  .finding.is-warn { border-left-color: var(--warn-line); }
+
+  .gid {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-right: 6px;
+    white-space: nowrap;
+  }
+
+  .level {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 6px;
+    white-space: nowrap;
+  }
+
+  .level--foundation { background: var(--risk-bg); color: var(--risk); }
+  .level--advanced { background: var(--na-bg); color: var(--na); }
+
+  code.ref {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+
+  .na-note {
+    font-family: var(--font-body);
+    font-size: 15.5px;
+    color: var(--ink-soft);
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin: 18px 0 4px;
+  }
+
+  /* ---------- Priority list ---------- */
+
+  ol.priority {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    counter-reset: pr;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  ol.priority li {
+    counter-increment: pr;
+    display: grid;
+    grid-template-columns: 30px 1fr auto;
+    align-items: start;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 13px 16px;
+  }
+
+  ol.priority li.is-done { background: var(--good-bg); border-color: var(--good-line); }
+  ol.priority li.is-done .pr-text { color: var(--ink-soft); }
+  ol.priority li.is-done .pr-text .gid { text-decoration: line-through; opacity: 0.7; }
+
+  ol.priority li::before {
+    content: counter(pr);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 15px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .pr-text {
+    font-family: var(--font-display);
+    font-size: 14.5px;
+    color: var(--ink);
+    line-height: 1.45;
+  }
+
+  .pr-text .gid { margin-right: 4px; }
+
+  /* ---------- Footer ---------- */
+
+  footer.colophon {
+    margin-top: 60px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-family: var(--font-display);
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  @media (max-width: 560px) {
+    body { padding: 0 14px 72px; }
+    .letterhead { margin: 0 -14px 0; }
+    header.masthead { padding: 34px 0 26px; }
+    .verdict { padding: 18px 16px; }
+    .topic > summary { padding: 15px 16px; }
+    .topic-body { padding: 0 16px 22px; }
+    ol.priority li { grid-template-columns: 22px 1fr; }
+    ol.priority li .pill { grid-column: 1 / -1; margin-top: 4px; }
+  }
+</style>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap">
+
+<div class="letterhead"></div>
+<div class="page">
+
+  <header class="masthead">
+    <p class="eyebrow">AI Excellence Framework &middot; Compliance Review</p>
+    <h1 class="title">Ava — Alignment Scorecard</h1>
+    <p class="meta-line">
+      <span>voice-contact-center repo</span>
+      <span>reviewed 2026-08-31</span>
+      <span>8 topics &middot; ~185 guideline items</span>
+      <span>agent/strands branch</span>
+    </p>
+
+    <div class="verdict">
+      <p class="verdict-label">Overall verdict</p>
+      <p>Sound agent architecture, not yet production-ready by the framework's own bar — though closer than the first pass showed. Versioning (AgentCore Runtime + Bedrock Prompt Management) and end-to-end tracing (AgentCore Observability) turn out to already be covered at the platform level. What's still open clusters in three places: hard guardrail enforcement in front of the claim-registration action, PII handling before the LLM call, and a testing/eval loop. One Foundation item is now fixed in code (see the changelog below); read the rest as the pre-production punch list.</p>
+
+      <div class="stat-row">
+        <div class="stat"><span class="n">0 / 8</span><span class="l">Fully aligned</span></div>
+        <div class="stat"><span class="n">5 / 8</span><span class="l">Partial</span></div>
+        <div class="stat"><span class="n">2 / 8</span><span class="l">Gap</span></div>
+        <div class="stat"><span class="n">1 / 8</span><span class="l">Not applicable</span></div>
+      </div>
+    </div>
+
+    <div class="verdict" style="border-left-color: var(--good); margin-top: 14px;">
+      <p class="verdict-label" style="color: var(--good);">Since the last review &middot; 2026-08-31</p>
+      <p style="margin-bottom: 10px;">Confirmed with the team that agent/prompt versioning and observability are already handled by AWS-native tooling rather than missing — three topics below were re-scored accordingly. One Foundation gap was also closed in code this pass:</p>
+      <ul class="finding-list" style="margin-bottom: 0;">
+        <li class="finding"><span class="gid">G1.22</span>Added a runtime <strong>grounding gate</strong> (<code class="ref">_GroundingGateTool</code> in <code class="ref">strands_agent.py</code>, the equivalent inline wrapper in <code class="ref">bot.py</code>) — any tool argument whose field name was already returned by an earlier successful tool call this session must match that returned value, or the call is blocked before it fires. A claim can no longer be registered against a policy id the model invented or lifted straight from what the caller said.</li>
+        <li class="finding"><span class="gid">&mdash;</span>Parametrized the Lambda's CORS origin (<code class="ref">ALLOWED_ORIGIN</code> env var, defaults to <code class="ref">*</code> for local testing) instead of a hardcoded wildcard — set it to the real frontend origin at deploy time.</li>
+      </ul>
+    </div>
+  </header>
+
+  <h2 class="section-head">Topics at a glance</h2>
+  <div class="overview-grid">
+
+    <a class="chip" href="#t1">
+      <div class="chip-top"><span class="chip-tag">T1</span><span class="pill pill--warn"><span class="dot"></span>Partial</span></div>
+      <p class="chip-title">Agent Orchestration</p>
+      <p class="chip-take">Right-sized as a single Tier&nbsp;3 agent, versioned via AgentCore Runtime. No model fallback or action-idempotency yet.</p>
+    </a>
+
+    <a class="chip" href="#t2">
+      <div class="chip-top"><span class="chip-tag">T2</span><span class="pill pill--warn"><span class="dot"></span>Partial</span></div>
+      <p class="chip-title">MCP &amp; Tool Design</p>
+      <p class="chip-take">Minimal, dynamically-loaded toolset. Argument grounding now checked at runtime; tool output still isn't treated as untrusted.</p>
+    </a>
+
+    <a class="chip" href="#t3">
+      <div class="chip-top"><span class="chip-tag">T3</span><span class="pill pill--warn"><span class="dot"></span>Partial</span></div>
+      <p class="chip-title">Memory &amp; Context</p>
+      <p class="chip-take">Correctly stateless with clean per-call isolation. PII flows into context unredacted.</p>
+    </a>
+
+    <a class="chip" href="#t4">
+      <div class="chip-top"><span class="chip-tag">T4</span><span class="pill pill--risk"><span class="dot"></span>Gap</span></div>
+      <p class="chip-title">Guardrails &amp; HITL</p>
+      <p class="chip-take">Every rule lives in prose. No deterministic gate in front of the claim-registration action.</p>
+    </a>
+
+    <a class="chip" href="#t5">
+      <div class="chip-top"><span class="chip-tag">T5</span><span class="pill pill--warn"><span class="dot"></span>Partial</span></div>
+      <p class="chip-title">Prompt Lifecycle</p>
+      <p class="chip-take">Versioned via Bedrock Prompt Management, but the code's own copy is duplicated across two files with no eval gate.</p>
+    </a>
+
+    <a class="chip" href="#t6">
+      <div class="chip-top"><span class="chip-tag">T6</span><span class="pill pill--na"><span class="dot"></span>N/A</span></div>
+      <p class="chip-title">Knowledge Pipelines</p>
+      <p class="chip-take">No RAG corpus in this project — policy data comes live from the gateway, not a document index.</p>
+    </a>
+
+    <a class="chip" href="#t7">
+      <div class="chip-top"><span class="chip-tag">T7</span><span class="pill pill--warn"><span class="dot"></span>Partial</span></div>
+      <p class="chip-title">AIOps</p>
+      <p class="chip-take">Tracing covered by AgentCore Observability. Still no cost tracking, budget alerts, agent registry, or scoped identity.</p>
+    </a>
+
+    <a class="chip" href="#t8">
+      <div class="chip-top"><span class="chip-tag">T8</span><span class="pill pill--risk"><span class="dot"></span>Gap</span></div>
+      <p class="chip-title">Testing &amp; Validation</p>
+      <p class="chip-take">No golden dataset, no regression suite, no CI gate. A prompt edit today ships unverified.</p>
+    </a>
+
+  </div>
+
+  <h2 class="section-head">Topic detail</h2>
+
+  <details class="topic" id="t1" open>
+    <summary>
+      <span class="topic-num">T1</span>
+      <h3 class="topic-name">Agent Orchestration</h3>
+      <span class="pill pill--warn"><span class="dot"></span>Partial</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">The core architectural calls are correct: one agent, one bounded conversational responsibility, and the "agent with a reasoning engine" tier is genuinely earned by real-time barge-in and dynamic tool choice rather than assumed by default. What's missing is the surrounding discipline the framework expects around that agent once it's live.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G1.14</span>A live, interruptible voice call with model-decided tool selection is a textbook Tier&nbsp;3 case — correctly not forced into a scripted flow (see the module docstring in <code class="ref">bot.py:11-22</code>).</li>
+        <li class="finding"><span class="gid">G1.07</span>Start Small — one agent, three tools, no premature decomposition into Manager/Specialist agents the workflow doesn't need.</li>
+        <li class="finding"><span class="gid">G1.05</span>Agent versioning is handled at the platform level — each deploy is a distinct AgentCore Runtime version (<code class="ref">create-agent-runtime</code> / <code class="ref">update-agent-runtime</code>), and the prompt text is versioned separately in Bedrock Prompt Management. Rollback is repointing at a prior runtime ARN / prompt version, not reconstructing state from memory.</li>
+        <li class="finding"><span class="gid">G1.22 (partial)</span>The claim-registration tool can no longer fire on an invented or unverified argument — see the grounding gate added to <code class="ref">bot.py</code> / <code class="ref">strands_agent.py</code> in the changelog above.</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G1.04</span>No fallback model or documented selection rationale — a Nova Sonic outage in the configured region halts Ava entirely.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G1.22</span>The new grounding gate stops an invented identifier from reaching the tool, but there's still no business-rule gate (e.g. a claim-amount threshold routing to human approval) before the action executes.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G1.19</span>No idempotency key on the claim tool call — a retried invocation (dropped ack, session rotation mid-call) could plausibly double-submit a claim.</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t2" open>
+    <summary>
+      <span class="topic-num">T2</span>
+      <h3 class="topic-name">MCP &amp; Tool Design</h3>
+      <span class="pill pill--warn"><span class="dot"></span>Partial</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">The dynamic tool-loading pattern is a genuine strength — nothing about a tool's name, schema, or description is hardcoded on either entry point, so the gateway can reshape its tools without a code change here. That same openness is also where the gaps live: nothing classifies which tools are safe to auto-invoke, and nothing treats what the gateway sends back as anything other than trusted.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G2.15</span>Minimum necessary toolset — exactly three tools (lookup, register claim, escalate), well inside any context budget.</li>
+        <li class="finding"><span class="gid">G2.06</span>Tool descriptions are read live from the gateway rather than redeclared, so behaviour can't drift from the source of truth (<code class="ref">bot.py:129-190</code>, <code class="ref">strands_agent.py:193-212</code>).</li>
+        <li class="finding"><span class="gid">G2.09</span>Generic <code class="ref">session_id</code> injection by schema inspection, not by hardcoded tool name — a well-scoped, minimal deterministic override on top of an otherwise fully agentic flow.</li>
+        <li class="finding"><span class="gid">G2.11 (partial)</span><code class="ref">_GroundingGateTool</code> (<code class="ref">strands_agent.py</code>) and its <code class="ref">bot.py</code> equivalent now block a tool call whose arguments weren't actually returned by an earlier tool this session — detected generically by field name, not a hardcoded tool list, matching this file's existing "detect by schema, not by name" pattern.</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G2.11</span>No info/action classification or per-tool autonomy level (auto / human-approve / escalate) — the claim-registration tool still runs unattended once its arguments pass the grounding check above; there's no threshold that routes it to a human.</li>
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G2.18</span>Tool results are JSON-parsed and handed straight into the model's context (<code class="ref">bot.py:165-172</code>) with no delimiting as untrusted data — a compromised or malformed gateway response has a direct path to influencing Ava's next decision.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G2.19</span>AWS credentials are read from <code class="ref">.env</code> / long-lived access keys rather than short-lived, task-scoped credentials from a secrets manager.</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t3" open>
+    <summary>
+      <span class="topic-num">T3</span>
+      <h3 class="topic-name">Memory &amp; Context</h3>
+      <span class="pill pill--warn"><span class="dot"></span>Partial</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">There's effectively no persistent memory here, and for this scope that's the right call — nothing about the workflow needs state to survive past the call. The one real exposure is what does flow through the single-session context: caller PII, unredacted.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G3.23</span>Clean per-call isolation — <code class="ref">strands_agent.py</code> builds a fresh <code class="ref">BidiAgent</code> and gateway connection per WebSocket, so concurrent callers never share state.</li>
+        <li class="finding"><span class="gid">G3.04</span>Need-justified memory — no speculative "log everything" store; session state is limited to the live conversation and a per-call session id.</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G3.25</span>Mobile numbers, policy IDs, and vehicle registrations reach Nova Sonic's context unredacted — nothing minimises or tokenises sensitive fields before they enter the model (shared root cause with <a href="#t4">T4 · G4.16</a>).</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t4" open>
+    <summary>
+      <span class="topic-num">T4</span>
+      <h3 class="topic-name">Guardrails &amp; HITL</h3>
+      <span class="pill pill--risk"><span class="dot"></span>Gap</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">This is the widest gap in the review, and the framework treats nearly all of it as Foundation-level. Every behavioural boundary Ava has — never fabricate, always confirm a number back, escalate when frustrated — lives entirely inside <code class="ref">SYSTEM_INSTRUCTION</code>. None of it is backed by a layer the model can't reason its way around.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G4.23</span>AI disclosure is explicit and up front — Ava states "I'm Ava, your AI Assistant" as her first sentence, not a dismissible banner (<code class="ref">SYSTEM_INSTRUCTION</code>, both files).</li>
+        <li class="finding"><span class="gid">G1.02</span>-adjacent judgment: the digit-by-digit read-back-and-confirm pattern before any lookup is a deliberate, well-specified control, even though it's enforced by instruction rather than code.</li>
+        <li class="finding"><span class="gid">G4.10 (partial)</span>The new grounding gate is a concrete instance of G4.10's "the model cannot reason its way around it" bar: the id-provenance rule now lives in an external wrapper the model never sees, not in the prompt it can drift away from.</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G4.02 / G4.10</span>The identifier-provenance rule is now enforced (see Aligned, above); every other rule — "never fabricate," the escalation judgment, tone — is still prose the model is asked to follow, not a machine-evaluable check.</li>
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G4.19</span>No risk/reversibility-based HITL trigger — claim registration is an irreversible business action gated only by Ava's own confidence, not a documented threshold.</li>
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G4.16</span>No PII redaction before the LLM call — see <a href="#t3">T3 · G3.25</a>.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G4.13</span>No indirect-injection defence on gateway tool output before it re-enters the conversation.</li>
+        <li class="finding is-warn"><span class="level level--advanced">Advanced</span><span class="gid">G4.26</span>Logging exists (<code class="ref">loguru</code> / <code class="ref">print</code> tool-call traces) but isn't a structured, immutable audit record — good for local debugging, not for demonstrating compliance.</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t5" open>
+    <summary>
+      <span class="topic-num">T5</span>
+      <h3 class="topic-name">Prompt Lifecycle</h3>
+      <span class="pill pill--warn"><span class="dot"></span>Partial</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">Versioning itself is well covered: the prompt is a git-tracked artefact <em>and</em> versioned in Bedrock Prompt Management. The residual risk isn't "no versioning" — it's that the code carries its own hardcoded copy of the instruction text rather than resolving it from Prompt Management at runtime, and that copy has quietly diverged into two places. Nothing yet checks that a prompt edit didn't regress behaviour, either.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G5.13</span>Versioned in two places: git history for <code class="ref">bot.py</code> / <code class="ref">strands_agent.py</code>, and separately in Bedrock Prompt Management — not a config-screen edit with no diff trail.</li>
+        <li class="finding"><span class="gid">G5.04 / G5.26</span>Clear role framing and an explicit scope-limitation instruction ("never fabricate... ask a clarifying question").</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-warn"><span class="level level--advanced">Advanced</span><span class="gid">G5.13 / G5.17</span>Two sources of truth for the same text: the git-committed <code class="ref">SYSTEM_INSTRUCTION</code> string (duplicated verbatim across <code class="ref">bot.py</code> and <code class="ref">strands_agent.py</code>) and whatever's live in Bedrock Prompt Management. Worth having the code resolve the prompt from Prompt Management at runtime instead of carrying its own copy, so there's one source and the two entry points can't drift from each other or from what's "deployed."</li>
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G5.22</span>No evaluation dataset and no regression gate — a prompt change ships the moment it "sounds right" in a manual test, with no golden-case check (ties directly into <a href="#t8">T8</a>).</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t6">
+    <summary>
+      <span class="topic-num">T6</span>
+      <h3 class="topic-name">Knowledge Pipelines</h3>
+      <span class="pill pill--na"><span class="dot"></span>Not applicable</span>
+    </summary>
+    <div class="topic-body">
+      <p class="na-note">This topic governs RAG corpora — ingestion, chunking, embedding, retrieval ranking. Ava has none: policy and claims data are read live from the AgentCore Gateway's backend systems of record, not from a document index this project owns. Nothing here to score against Topic&nbsp;6 unless a knowledge base is added later (e.g. for general insurance FAQs).</p>
+    </div>
+  </details>
+
+  <details class="topic" id="t7" open>
+    <summary>
+      <span class="topic-num">T7</span>
+      <h3 class="topic-name">AIOps</h3>
+      <span class="pill pill--warn"><span class="dot"></span>Partial</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">Tracing was the biggest single item here, and it's already handled — AgentCore Observability means end-to-end tracing doesn't need to be built from scratch in this repo. What's left is the cost/identity/registry layer the framework expects around it.</p>
+
+      <h3 class="subhead good">Aligned</h3>
+      <ul class="finding-list">
+        <li class="finding"><span class="gid">G7.01</span>AgentCore Observability (CloudWatch GenAI dashboards) gives auto-instrumented spans for model calls and tool calls via the <code class="ref">bedrock_agentcore</code> runtime's built-in OpenTelemetry tracing — end-to-end tracing without custom instrumentation in this repo.</li>
+        <li class="finding"><span class="gid">G7.02</span>-adjacent: the <code class="ref">[tool call]</code> / <code class="ref">[tool result]</code> log lines in both entry points give a readable decision-path seed on top of the platform tracing.</li>
+        <li class="finding"><span class="gid">&mdash;</span>Lambda CORS is now driven by <code class="ref">ALLOWED_ORIGIN</code> (defaults to <code class="ref">*</code> for local testing) — set it at deploy time instead of shipping a hardcoded wildcard.</li>
+      </ul>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G7.04 / G7.05</span>No per-invocation token/cost tracking and no budget alerting or kill switch — a runaway loop or adversarial input has no ceiling.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G7.08</span>No agent registry — nothing records model version, prompt version, and connected tools as one queryable record.</li>
+        <li class="finding is-warn"><span class="level level--foundation">Foundation</span><span class="gid">G7.14 / G7.16</span>Ava runs under a developer's IAM access key rather than a distinct, scoped non-human identity with rotated credentials.</li>
+      </ul>
+    </div>
+  </details>
+
+  <details class="topic" id="t8" open>
+    <summary>
+      <span class="topic-num">T8</span>
+      <h3 class="topic-name">Testing &amp; Validation</h3>
+      <span class="pill pill--risk"><span class="dot"></span>Gap</span>
+    </summary>
+    <div class="topic-body">
+      <p class="topic-verdict">There is no test suite of any kind in this repository today — no golden dataset, no automated scoring, no CI gate. Every item in this topic is currently unmet, and most of them are Foundation-level.</p>
+
+      <h3 class="subhead risk">Gaps</h3>
+      <ul class="finding-list">
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G8.05</span>No golden dataset for Ava's core judgments (identity confirmation, policy lookup, claim intake, escalation) — nothing to score a prompt change against.</li>
+        <li class="finding is-risk"><span class="level level--foundation">Foundation</span><span class="gid">G8.15 / G8.17</span>No CI-gated regression run — a prompt or model-config change reaches <code class="ref">main</code> with no automated check.</li>
+        <li class="finding is-warn"><span class="level level--advanced">Advanced</span><span class="gid">G8.09</span>No adversarial test cases (prompt injection via a caller's speech, out-of-scope requests, boundary claim amounts).</li>
+      </ul>
+    </div>
+  </details>
+
+  <h2 class="section-head">Before this goes anywhere near production</h2>
+  <ol class="priority">
+    <li class="is-done">
+      <p class="pr-text"><span class="gid">G1.22</span>Put a deterministic check in front of claim registration. <strong>Done:</strong> arguments must now be grounded in a prior lookup result; a claim-amount/human-approval threshold is still open.</p>
+      <span class="pill pill--good"><span class="dot"></span>Fixed</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G4.16</span>Redact or tokenise PII (mobile number, policy ID, vehicle reg) before it enters Nova Sonic's context.</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G2.18</span>Wrap gateway tool responses as explicitly untrusted data before they re-enter the conversation.</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G4.02</span>Move "never fabricate" / "always confirm" from prompt-only instruction to an enforced, external check — the id-provenance rule is done; the rest remain prose.</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G1.04</span>Define and test a fallback model + provider for a Nova Sonic outage.</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G1.19</span>Add an idempotency key to the claim-registration call.</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+    <li class="is-done">
+      <p class="pr-text"><span class="gid">&mdash;</span>Replace the Lambda's hardcoded <code class="ref">Access-Control-Allow-Origin: *</code>. <strong>Done:</strong> now reads <code class="ref">ALLOWED_ORIGIN</code> — set it to the real frontend origin at deploy time.</p>
+      <span class="pill pill--good"><span class="dot"></span>Fixed</span>
+    </li>
+    <li>
+      <p class="pr-text"><span class="gid">G8.05</span>Stand up a ~30-case golden dataset and a CI regression gate before the next prompt edit ships (tracing is already covered by AgentCore Observability — see T7).</p>
+      <span class="pill pill--risk"><span class="dot"></span>Foundation</span>
+    </li>
+  </ol>
+
+  <footer class="colophon">
+    Initial review based on a static read of <code class="ref">bot.py</code>, <code class="ref">agentcore_app/strands_agent.py</code>, <code class="ref">lambda/presigned_url_handler.py</code>, and <code class="ref">README.md</code> on the <code class="ref">agent/strands</code> branch, against the eight AI Excellence Framework spreadsheets supplied by the user (Topics 1&ndash;8, v1.0&ndash;v1.3, ~185 items). Updated 2026-08-31 to reflect AWS-native versioning (AgentCore Runtime, Bedrock Prompt Management) and observability (AgentCore Observability) confirmed by the team, and to record the grounding-gate and CORS fixes applied in code that same day. Gateway-side backend code and infrastructure outside this repository were not reviewed. This is a design-time gap analysis, not a security audit or a substitute for adversarial testing.
+  </footer>
+
+</div>
