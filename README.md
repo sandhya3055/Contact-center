@@ -162,23 +162,52 @@ browser ── connects directly with that URL ──> agentcore_app/strands_age
   on that ARN. Package `bedrock-agentcore` (see `lambda/requirements.txt`)
   into the deployment zip or a layer — it isn't in the base Lambda runtime.
 - **`frontend/index.html`** — a single self-contained page: enter your
-  Lambda's endpoint URL (Function URL or API Gateway), click **Talk to
-  Ava**, and it fetches the presigned URL, opens the WebSocket, streams mic
-  audio as base64 PCM16/16kHz (`{"type": "bidi_audio_input", ...}`), plays
-  back Ava's audio (`{"type": "bidi_audio_stream", ...}`), and shows a live
-  transcript. No build step — open it directly, or serve it from anywhere
-  static.
+  caller mobile number (optional — lets Ava skip asking for it out loud;
+  sent as one `{"type": "bidi_call_metadata", ...}` message right after the
+  socket opens, see `strands_agent.py`) and, under **Connection settings**,
+  your Lambda's endpoint URL (Function URL or API Gateway) or a direct
+  `ws://`/`wss://` URL for local testing. Click **Talk to Ava** and it
+  fetches the presigned URL (skipped for a `ws://`/`wss://` endpoint — see
+  below), opens the WebSocket, streams mic audio as base64 PCM16/16kHz
+  (`{"type": "bidi_audio_input", ...}`), plays back Ava's audio
+  (`{"type": "bidi_audio_stream", ...}`), and shows a live, fixed-height
+  scrollable transcript. No build step — open it directly, or serve it from
+  anywhere static.
 
-**Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
-Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**
+### Run it locally (no AWS deploy needed)
 
-To test `agentcore_app/strands_agent.py` locally before deploying it:
+Runs `strands_agent.py` on your machine and points the browser UI straight
+at it, skipping the Lambda/presign step entirely:
+
 ```bash
 cd agentcore_app
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # reuse the same .env values as bot.py (MCP_SERVER_URL, AWS_REGION, AWS_ACCESS_KEY_ID, ...)
 python strands_agent.py
-# then point frontend/index.html's endpoint field at ws://127.0.0.1:8080/ws directly
-# (skip the Lambda for local testing — see frontend/index.html's fetch() call)
 ```
+
+Then open `frontend/index.html` directly in a browser (double-click it, or
+`open frontend/index.html`) and, under **Connection settings**, set the
+endpoint field to:
+```
+ws://127.0.0.1:8080/ws
+```
+The frontend detects a `ws://`/`wss://` endpoint and connects to it
+directly instead of treating it as a presign Lambda to `fetch()` first.
+Click **Talk to Ava**.
+
+### Run it after deploying
+
+Once `agentcore_app/DEPLOY.md`'s steps are done, you'll have an Agent
+Runtime ARN and a Lambda Function URL in front of it:
+
+1. Open `frontend/index.html` (same file, no separate build/hosting step
+   required — or serve it from S3/CloudFront/any static host).
+2. Under **Connection settings**, set the endpoint field to your Lambda's
+   Function URL (or API Gateway URL) — the one whose only job is minting a
+   presigned WebSocket URL for your runtime ARN.
+3. Optionally enter a caller mobile number, then click **Talk to Ava**.
+
+**Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
+Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**

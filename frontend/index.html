@@ -203,16 +203,21 @@
   .call-btn-labels span { width: 60px; text-align: center; }
 
   /* ---------- transcript ---------- */
-  .transcript-panel { display: flex; flex-direction: column; min-height: 520px; }
+  .transcript-panel { display: flex; flex-direction: column; height: 560px; }
   .transcript-header {
     padding: 16px 20px; border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 8px;
+    flex-shrink: 0;
   }
   .transcript-header .title { font-size: 13.5px; font-weight: 600; }
   .transcript-header .sub { font-size: 12px; color: var(--text-faint); margin-left: auto; }
   #transcript {
     padding: 20px;
     flex: 1;
+    /* min-height: 0 overrides flex items' default min-height: auto, which
+       otherwise lets this grow to fit all messages instead of clipping to
+       the panel's fixed height and scrolling internally. */
+    min-height: 0;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -296,7 +301,7 @@
       <div class="field">
         <label for="presignEndpoint">Presigned-URL endpoint</label>
         <input id="presignEndpoint" type="text"
-          placeholder="Function URL or API Gateway URL">
+          placeholder="Function URL, API Gateway URL, or ws://127.0.0.1:8080/ws for local testing">
       </div>
     </details>
   </div>
@@ -347,6 +352,22 @@ function validateMobile() {
 }
 
 mobileInput.addEventListener('input', validateMobile);
+
+let syncHintTimeout = null;
+
+function syncMobileNumber(value) {
+  mobileInput.value = value;
+  localStorage.setItem('ava_mobile_number', value);
+  validateMobile();
+
+  mobileHint.textContent = 'Updated from the call — Ava confirmed a different number.';
+  mobileHint.classList.remove('error');
+  if (syncHintTimeout) clearTimeout(syncHintTimeout);
+  syncHintTimeout = setTimeout(() => {
+    mobileHint.textContent = MOBILE_HINT_DEFAULT;
+    syncHintTimeout = null;
+  }, 4000);
+}
 
 let ws = null;
 let audioCtx = null;
@@ -587,9 +608,18 @@ async function start() {
   setStatus('connecting', 'Connecting…');
 
   try {
-    const res = await fetch(endpoint);
-    if (!res.ok) throw new Error(`Presign request failed: ${res.status}`);
-    const { url } = await res.json();
+    // A ws://ish endpoint (local strands_agent.py, no deploy) is a
+    // WebSocket URL already — fetch() can't request that scheme at all, so
+    // skip the presign round trip and connect straight to it. Anything
+    // else is treated as the presign Lambda's HTTP(S) endpoint, as before.
+    let url;
+    if (/^wss?:\/\//i.test(endpoint)) {
+      url = endpoint;
+    } else {
+      const res = await fetch(endpoint);
+      if (!res.ok) throw new Error(`Presign request failed: ${res.status}`);
+      ({ url } = await res.json());
+    }
 
     ws = new WebSocket(url);
 
@@ -625,6 +655,14 @@ async function start() {
       }
       if (data.type === 'bidi_interruption') {
         stopPlayback();
+      }
+      if (data.type === 'bidi_call_metadata_update' && data.mobile_number) {
+        // Ava confirmed a different number than what the UI pre-filled —
+        // e.g. the caller corrected a wrong one mid-call (see the "Phone
+        // numbers" business rule in strands_agent.py). Keep the field and
+        // localStorage in sync so the caller doesn't have to also go back
+        // and retype it after the call.
+        syncMobileNumber(data.mobile_number);
       }
     };
 

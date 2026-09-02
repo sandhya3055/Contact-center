@@ -54,9 +54,9 @@ import re
 import time
 import uuid
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import boto3
 from dotenv import load_dotenv
@@ -311,6 +311,66 @@ class _LoggingTool(AgentTool):
         print(f"[tool result] {tool_use['name']} -> {result}")
 
 
+class _MobileNumberSyncTool(AgentTool):
+    """Wraps an AgentTool so a successful call's phone-number-shaped
+    argument is pushed back to the browser as a `bidi_call_metadata_update`
+    event whenever it's new for this call.
+
+    Covers the caller-correction case: the UI pre-fills a number, but the
+    caller says it's wrong and states a different one — once a lookup
+    succeeds on the corrected number, this lets frontend/index.html update
+    its input field (and localStorage) to match, without the caller having
+    to separately go back and retype it after the call.
+
+    Detected the same way _TranscriptConsistencyGateTool detects a phone
+    number -- by value shape (_PHONE_LIKE_PATTERN, "+" then only digits),
+    not by field name. The gateway's actual argument for this is named
+    plainly `number`, which a name-based hint would either miss entirely or
+    (if broadened to match "number") false-positive on account_number,
+    card_number, claim_number, and similar unrelated identifiers -- value
+    shape avoids that ambiguity and needs no hardcoded field name at all.
+    """
+
+    def __init__(
+        self,
+        wrapped: AgentTool,
+        on_confirmed: Callable[[str], Awaitable[None]],
+        known: list[str | None],
+    ) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._on_confirmed = on_confirmed
+        self._known = known
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        result_event = None
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            result_event = event
+            yield event
+
+        if not (isinstance(result_event, ToolResultEvent) and result_event.tool_result.get("status") == "success"):
+            return
+
+        for value in (tool_use.get("input") or {}).values():
+            if isinstance(value, str) and _PHONE_LIKE_PATTERN.match(value):
+                if value != self._known[0]:
+                    self._known[0] = value
+                    await self._on_confirmed(value)
+                break
+
+
 class _FixedArgumentTool(AgentTool):
     """Wraps any AgentTool so one argument is always injected with a fixed
     value and removed from the schema the model sees.
@@ -500,12 +560,28 @@ class _IdempotencyGateTool(AgentTool):
     rather than kept for the whole call, so a genuinely new, later call
     with coincidentally identical arguments (e.g. re-checking status) still
     gets a fresh execution rather than being served stale data forever.
+
+    Separately (and not time-windowed the way the cache above is), this
+    also counts how many times a given exact argument set has been tried
+    at all this call. Observed bug: after a caller corrected their mobile
+    number several times, Nova Sonic kept calling get_policy with the same
+    stale, already-failed arguments regardless — verbally engaging with
+    "let me get your corrected number" without the tool call ever actually
+    changing. Rather than guess at a corrected value ourselves (risky for
+    an identity-verification lookup — a wrong guess would look confident
+    while being wrong, worse than the visible stuck loop), this forces a
+    clean exit: past _MAX_IDENTICAL_ATTEMPTS with literally unchanged
+    arguments, refuse to call the tool again and require escalation
+    instead of retrying forever.
     """
+
+    _MAX_IDENTICAL_ATTEMPTS = 3
 
     def __init__(self, wrapped: AgentTool) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._cache: dict[str, tuple[float, ToolResult]] = {}
+        self._attempt_counts: dict[str, int] = {}
 
     @property
     def tool_name(self) -> str:
@@ -521,6 +597,33 @@ class _IdempotencyGateTool(AgentTool):
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
         cache_key = json.dumps(tool_use.get("input") or {}, sort_keys=True, default=str)
+
+        attempts = self._attempt_counts.get(cache_key, 0) + 1
+        self._attempt_counts[cache_key] = attempts
+        if attempts > self._MAX_IDENTICAL_ATTEMPTS:
+            print(
+                f"[repeat blocked] {tool_use['name']} called with the exact same arguments "
+                f"{attempts - 1} times already this call with nothing changed — forcing escalation"
+            )
+            yield ToolResultEvent(
+                {
+                    "toolUseId": tool_use["toolUseId"],
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                "This exact request has already been tried multiple times this call "
+                                "with unchanged details and hasn't worked. Do not retry it again with "
+                                "the same information — that will not help. Tell the caller plainly "
+                                "that you're unable to complete this with what's been provided so far, "
+                                "and escalate to a human agent."
+                            )
+                        }
+                    ],
+                }
+            )
+            return
+
         cached = self._cache.get(cache_key)
         now = time.monotonic()
         if cached is not None and now - cached[0] < IDEMPOTENCY_WINDOW_SECONDS:
@@ -651,6 +754,12 @@ _DATE_FIELD_HINTS = ("dob", "birth")
 # all — long enough that a coincidental digit-substring match against
 # unrelated conversation is unlikely.
 _FABRICATION_MIN_DIGITS = 6
+
+# Minimum digit count for the caller's most recent speech to be trusted as
+# "clearly said a different phone number" in _StaleNumberReuseGate below —
+# long enough that a short, unrelated digit mention doesn't get read as a
+# rejection of the number currently in use.
+_STALE_REUSE_MIN_DIGITS = 7
 
 # Vocabulary for _mentions_a_number: single-digit words, teens, tens,
 # magnitude words, ordinals (needed since a caller states a day of month as
@@ -788,6 +897,21 @@ class _TranscriptConsistencyGateTool(AgentTool):
     field's provenance is that gate's job, and a value legitimately
     returned by an earlier lookup was never spoken by the caller either, so
     it would otherwise look identical to a fabrication here.
+
+    4. Any phone-number-shaped argument that repeats a value already tried
+       earlier this call (tracked in tried_numbers) is blocked if the
+       caller's most recent speech contains a different, phone-plausible-
+       length digit sequence (_STALE_REUSE_MIN_DIGITS) — i.e. Ava is about
+       to silently reuse a number the caller has since moved on from.
+       Observed bug: after a caller corrects a wrong number — sometimes at
+       Ava's own request — the very next lookup call keeps using the
+       original, already-failed number anyway, with no indication to the
+       caller that the correction was dropped. This doesn't guess what the
+       correct number actually is (an identity-verification lookup is the
+       wrong place for a guess); it only refuses to let a demonstrably
+       stale value slide through unnoticed, forcing Ava back to the caller
+       instead — the same "never fabricate, ask instead" principle as #2
+       and #3, applied to reuse instead of invention.
     """
 
     def __init__(
@@ -795,11 +919,13 @@ class _TranscriptConsistencyGateTool(AgentTool):
         wrapped: AgentTool,
         recent_digits: _RecentUserDigits,
         grounded_values: dict[str, set[str]],
+        tried_numbers: set[str],
     ) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._recent_digits = recent_digits
         self._grounded_values = grounded_values
+        self._tried_numbers = tried_numbers
 
     @property
     def tool_name(self) -> str:
@@ -885,11 +1011,63 @@ class _TranscriptConsistencyGateTool(AgentTool):
             )
             return
 
+        phone_args = [
+            (key, value) for key, value in arguments.items()
+            if isinstance(value, str) and _PHONE_LIKE_PATTERN.match(value)
+        ]
+        stale_fields = [
+            key
+            for key, value in phone_args
+            if value in self._tried_numbers
+            and len(spoken) >= _STALE_REUSE_MIN_DIGITS
+            # Containment, not equality: `spoken` is a windowed buffer that
+            # can still hold digits from an earlier, unrelated turn (a dob
+            # recorded a moment before) concatenated alongside a legitimate
+            # re-confirmation of this same number — checking that the
+            # number's own digits still appear *somewhere* in `spoken`
+            # avoids flagging that as a mismatch, while a genuinely
+            # different number the caller just gave won't appear at all.
+            and value[1:] not in spoken
+        ]
+        if stale_fields:
+            print(
+                f"[stale number blocked] {tool_use['name']} args {stale_fields} repeat an "
+                f"already-tried number, but the caller most recently said different digits "
+                f"({spoken!r}) — refusing the silent reuse"
+            )
+            yield ToolResultEvent(
+                {
+                    "toolUseId": tool_use["toolUseId"],
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                f"Do not call this with {', '.join(stale_fields)} unchanged — that "
+                                "exact number was already tried, and the caller has since said "
+                                "different digits. Use exactly what the caller most recently said "
+                                "(read it back one digit at a time and get an explicit yes first), "
+                                "or if you're not sure what they said, ask them to repeat their "
+                                "number in full before calling this tool again."
+                            )
+                        }
+                    ],
+                }
+            )
+            return
+
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
             yield event
 
+        for _, value in phone_args:
+            self._tried_numbers.add(value)
 
-async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserDigits) -> list[AgentTool]:
+
+async def build_gateway_tools(
+    mcp_client: MCPClient,
+    recent_digits: _RecentUserDigits,
+    on_mobile_number_confirmed: Callable[[str], Awaitable[None]],
+    known_mobile_number: list[str | None],
+) -> list[AgentTool]:
     """Load every tool the gateway currently exposes, unmodified.
 
     No tool name, parameter list, or description is hardcoded here — change
@@ -901,15 +1079,18 @@ async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserD
     Every tool is also wrapped with _ToolOutputSanitizerTool (untrusted
     output, G2.18), _GroundingGateTool (argument provenance),
     _IdempotencyGateTool (safe-retry caching, G1.19), _HighValueClaimGateTool
-    (HITL threshold, G4.19), and _TranscriptConsistencyGateTool (catches
-    both a digit Nova Sonic dropped in speech-to-text, and an identity-
-    shaped argument — a date of birth, an account number — the model
-    invented rather than one the caller actually provided) — all scoped to
-    this call's grounded_values/cache/recent_digits, so state never leaks
-    across connections.
+    (HITL threshold, G4.19), _TranscriptConsistencyGateTool (catches both a
+    digit Nova Sonic dropped in speech-to-text, and an identity-shaped
+    argument — a date of birth, an account number — the model invented
+    rather than one the caller actually provided), and
+    _MobileNumberSyncTool (pushes a newly-confirmed mobile/phone number back
+    to the browser) — all scoped to this call's
+    grounded_values/cache/recent_digits/known_mobile_number, so state never
+    leaks across connections.
     """
     call_session_id = str(uuid.uuid4())
     grounded_values: dict[str, set[str]] = {}
+    tried_numbers: set[str] = set()
     all_tools = await mcp_client.load_tools()
     print(f"[gateway] tools discovered: {[t.tool_name for t in all_tools]}")
 
@@ -921,7 +1102,8 @@ async def build_gateway_tools(mcp_client: MCPClient, recent_digits: _RecentUserD
         tool = _GroundingGateTool(tool, grounded_values)
         tool = _IdempotencyGateTool(tool)
         tool = _HighValueClaimGateTool(tool)
-        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values)
+        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers)
+        tool = _MobileNumberSyncTool(tool, on_mobile_number_confirmed, known_mobile_number)
         wrapped.append(_LoggingTool(tool))
 
     return wrapped
@@ -977,7 +1159,25 @@ async def voice_chat(websocket: WebSocket) -> None:
         # latency on top of accept() before the caller's mic could even
         # start streaming.
         recent_digits = _RecentUserDigits()
-        tools_task = asyncio.create_task(build_gateway_tools(mcp_client, recent_digits))
+
+        # Single-item mutable box (not a plain variable) so build_gateway_tools
+        # -- which is already running as a background task by the time
+        # mobile_number below is known -- and the seeding step further down
+        # both observe the same live value rather than each getting a frozen
+        # copy from whenever they captured it.
+        known_mobile_number: list[str | None] = [None]
+
+        async def notify_mobile_number(value: str) -> None:
+            # Best-effort: a send failing here (e.g. the socket closed mid-call)
+            # shouldn't take down the call itself, just the UI sync.
+            try:
+                await websocket.send_json({"type": "bidi_call_metadata_update", "mobile_number": value})
+            except Exception as exc:
+                print(f"[mobile sync] failed to notify frontend: {exc}")
+
+        tools_task = asyncio.create_task(
+            build_gateway_tools(mcp_client, recent_digits, notify_mobile_number, known_mobile_number)
+        )
         prompt_task = asyncio.create_task(get_system_prompt())
         await websocket.accept()
         print("WebSocket connection accepted")
@@ -1000,6 +1200,22 @@ async def voice_chat(websocket: WebSocket) -> None:
 
         tools = await tools_task
         system_prompt = await prompt_task
+        # Neither the local SYSTEM_INSTRUCTION nor the Bedrock-managed prompt
+        # has any way to know today's date on its own — without this, "the
+        # incident was yesterday" has nothing real to resolve against, and
+        # the model fills in a plausible-looking but fabricated date instead
+        # (observed: a caller's "yesterday" turned into an unrelated date
+        # from a different year). Computed fresh per call, not baked into
+        # any prompt text, so it's always right regardless of when the
+        # container was last deployed.
+        today = datetime.now(timezone.utc)
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"Today's date is {today:%Y-%m-%d} ({today:%A}), UTC. Resolve any "
+            "relative date the caller gives you (\"yesterday\", \"last Monday\", "
+            "\"three days ago\") against this, in ISO 8601 (YYYY-MM-DD) format "
+            "for any tool argument — never invent a date."
+        )
         voice_agent = BidiAgent(
             model=sonic_model,
             tools=[*tools, stop_conversation],
@@ -1022,6 +1238,7 @@ async def voice_chat(websocket: WebSocket) -> None:
         # because the caller typed it instead of saying it aloud.
         if mobile_number:
             recent_digits.seed(mobile_number)
+            known_mobile_number[0] = mobile_number
 
         # Nova Sonic only speaks in response to a turn it detects — without
         # this nudge Ava sits silently until the caller says something first,
@@ -1036,15 +1253,26 @@ async def voice_chat(websocket: WebSocket) -> None:
         # When the caller already typed their mobile number into the UI,
         # that text carries no speech-to-text risk (unlike a spoken number),
         # so this tells Ava to use it straight away instead of asking for it
-        # and reading it back digit by digit, per SYSTEM_INSTRUCTION.
+        # and reading it back digit by digit, per SYSTEM_INSTRUCTION. This is
+        # a default for the *first* lookup only, not a lock for the whole
+        # call — observed bug: without the explicit override note below, Ava
+        # treated "already confirmed" as permanent and kept reusing this
+        # number even after the caller explicitly said it was wrong and
+        # stated a different one. A caller correction must always win.
         if mobile_number:
             greeting_text = (
                 "(the call has just connected. The caller already entered their "
                 f"mobile number through the app, exactly as typed: {mobile_number}. "
-                "It was not spoken, so there is no speech-to-text risk — treat it "
-                "as already confirmed. Greet the caller in one short sentence and "
-                "look up their policy on this number directly, without asking for "
-                "it or reading it back to confirm — begin now)"
+                "It was not spoken, so there is no speech-to-text risk for this "
+                "specific value — treat it as already confirmed for your first "
+                "lookup only, without asking for it or reading it back to confirm. "
+                "This is a default, not a lock: if the caller says this number is "
+                "wrong, or states a different number at any point in the call, "
+                "that correction overrides it — confirm the new number the normal "
+                "way (read it back one digit at a time, get an explicit yes) and "
+                "use only that confirmed number from then on, never falling back "
+                "to this original one. Greet the caller in one short sentence, "
+                "then look up their policy — begin now)"
             )
         else:
             greeting_text = "(the call has just connected — begin now)"
