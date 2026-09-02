@@ -1,0 +1,7 @@
+{
+  "MCP_SERVER_URL": "https://gateway-quick-start-ad8a4f-evcjac2ebc.gateway.bedrock-agentcore.us-west-2.amazonaws.com/mcp",
+  "AWS_REGION": "us-west-2",
+  "BEDROCK_REGION": "us-east-1",
+  "MODEL_ID": "amazon.nova-2-sonic-v1:0",
+  "BEDROCK_PROMPT_ID": "arn:aws:bedrock:us-west-2:128486226972:prompt/A0VX004GJB"
+}
