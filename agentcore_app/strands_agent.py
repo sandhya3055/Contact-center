@@ -419,6 +419,24 @@ def _requires_argument(tool: AgentTool, argument_name: str) -> bool:
     return argument_name in schema.get("required", [])
 
 
+# Tool names (bare, after the Gateway's "<target>___" prefix) that need a fixed
+# session_id injected even though their advertised inputSchema doesn't declare
+# one, so _requires_argument can't find it. Confirmed by pulling the live
+# Gateway target's schema directly (get_gateway_target): escalate's schema has
+# no session_id property at all, yet the Lambda behind it (mcp_tools.py's
+# _escalate) does `event["session_id"]` with no fallback -- every escalation
+# call fails with a KeyError until this is injected some other way. A schema
+# fix on the Gateway side would be the "real" fix, but that's a live AWS
+# resource this code doesn't own the deployment of, so this closes the gap
+# from the client instead.
+_SESSION_ID_TOOL_NAMES_WITHOUT_SCHEMA_PROPERTY = {"escalate"}
+
+
+def _bare_tool_name(tool: AgentTool) -> str:
+    """Strip the Gateway's "<target>___" prefix off a tool's name, if present."""
+    return tool.tool_name.rsplit("___", 1)[-1]
+
+
 def _extract_json(tool_result: ToolResult) -> dict[str, Any] | None:
     """Best-effort extraction of a tool result's JSON payload as a dict, checking
     both the `json` and `text` (JSON-encoded string) content shapes a gateway tool
@@ -1096,7 +1114,9 @@ async def build_gateway_tools(
 
     wrapped: list[AgentTool] = []
     for tool in all_tools:
-        if _requires_argument(tool, "session_id"):
+        if _requires_argument(tool, "session_id") or (
+            _bare_tool_name(tool) in _SESSION_ID_TOOL_NAMES_WITHOUT_SCHEMA_PROPERTY
+        ):
             tool = _FixedArgumentTool(tool, session_id=call_session_id)
         tool = _ToolOutputSanitizerTool(tool)
         tool = _GroundingGateTool(tool, grounded_values)

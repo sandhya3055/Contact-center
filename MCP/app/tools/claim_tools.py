@@ -17,7 +17,7 @@ from datetime import date
 from app.config import AppConfig
 from app.data.claims import ClaimRepository
 from app.data.counters import CounterRepository
-from app.data.models import Claim, ClaimStatus, ClaimType
+from app.data.models import Claim, ClaimStatus, ClaimType, epoch_to_au
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,8 @@ def create_claim_pending(
         slots: Captured + read-back-confirmed claim details.
         now_epoch: Current time (epoch seconds) — injected so the token's date segment
             and the claim's ``created_at`` are deterministic and unit-testable.
+            Formatted to an AU (Sydney-local) string (see ``epoch_to_au``) before being
+            stored as ``created_at`` — the epoch int itself is never persisted.
 
     Returns:
         The minted claim reference, read back to the caller as "logged" (rule #8) —
@@ -95,7 +97,7 @@ def create_claim_pending(
         status=ClaimStatus.PENDING,
         incident_date=slots.incident_date,
         incident_location=slots.incident_location,
-        created_at=now_epoch,
+        created_at=epoch_to_au(now_epoch),
         garage_name=slots.garage_name,
         tow_required=slots.tow_required,
         estimated_cost=slots.estimated_cost,

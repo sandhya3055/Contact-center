@@ -2,9 +2,14 @@
 
 The ``status-index`` GSI (HASH ``status``, RANGE ``queueKey``) is what lets
 Milestone F's assignment Lambda pull the queue in priority order without ever
-scanning the table (D15). ``queueKey = f"{priority:02d}#{created_at:011d}"``, so an
-ascending sort naturally yields highest priority first, oldest first within a
-priority — the FIFO-within-priority ordering an ACD needs.
+scanning the table (D15). ``queueKey = f"{priority:02d}#{epoch_to_sort_key(now)}"``
+— a zero-padded epoch string (see ``app.data.models.epoch_to_sort_key``), fixed-width
+and monotonic, so it still sorts correctly as plain text — an ascending sort naturally
+yields highest priority first, oldest first within a priority — the FIFO-within-priority
+ordering an ACD needs. Deliberately *not* built from ``created_at`` itself: that field is
+now an AU (Sydney-local) display string (``epoch_to_au``), which is neither
+lexicographically sortable (``DD/MM/YYYY``) nor guaranteed monotonic (Sydney's clock
+falls back an hour at the AEDT->AEST transition).
 
 The reason→priority mapping that builds that key lives in
 :mod:`app.escalation.priority`, not here: it is escalation policy rather than table
@@ -18,7 +23,7 @@ from boto3.dynamodb.conditions import Key
 
 from app.config import AppConfig
 from app.data.dynamo import get_dynamo_resource
-from app.data.models import EscalationRecord, EscalationStatus
+from app.data.models import EscalationRecord, EscalationStatus, epoch_to_au
 
 _STATUS_INDEX = "status-index"
 
@@ -99,7 +104,10 @@ class EscalationRepository:
         Args:
             escalation_id: Row to claim.
             agent_id: Claiming agent; recorded as ``assignedAgentId``.
-            now: Epoch seconds, recorded as ``claimedAt``.
+            now: Epoch seconds (injected for determinism/testability, same pattern as
+                ``now_epoch`` elsewhere); formatted to an AU (Sydney-local) string before
+                being recorded as ``claimedAt`` — the epoch int itself is never
+                persisted.
 
         Returns:
             ``True`` if this call performed the transition, ``False`` if the row was
@@ -116,7 +124,7 @@ class EscalationRepository:
                     ":queued": EscalationStatus.QUEUED.value,
                     ":offered": EscalationStatus.OFFERED.value,
                     ":agent": agent_id,
-                    ":now": now,
+                    ":now": epoch_to_au(now),
                 },
             )
             return True

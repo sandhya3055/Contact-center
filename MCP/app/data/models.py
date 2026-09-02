@@ -13,11 +13,44 @@ by the LLM (the model only phrases the number we hand it).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 _ISO_DATE_FMT = "%Y-%m-%d"
+_AU_DATETIME_FMT = "%d/%m/%Y %H:%M:%S %Z"
+_AU_TZ = ZoneInfo("Australia/Sydney")
+
+
+def epoch_to_au(epoch_seconds: int) -> str:
+    """Format an epoch-seconds "now" as an AU (Sydney-local) datetime string, e.g.
+    "02/09/2026 14:30:00 AEST" — what every ``created_at``/``last_heartbeat``/
+    ``claimed_at`` field below stores instead of a raw epoch int.
+
+    Callers still inject the current time as an epoch int (``now_epoch``,
+    ``int(time.time())``) for the same determinism/testability reason as
+    before — this is only the formatting step at the point of storage.
+
+    Not lexicographically sortable (``DD/MM/YYYY`` doesn't sort chronologically,
+    and the Sydney clock also falls back an hour at the AEDT->AEST DST
+    transition, so even same-format local time isn't reliably monotonic). Never
+    build a sort key out of this — see ``epoch_to_sort_key`` for
+    ``EscalationRecord.queue_key``.
+    """
+    return datetime.fromtimestamp(epoch_seconds, tz=_AU_TZ).strftime(_AU_DATETIME_FMT)
+
+
+def epoch_to_sort_key(epoch_seconds: int) -> str:
+    """Zero-padded epoch-seconds string, for lexicographic ordering only.
+
+    Deliberately decoupled from ``epoch_to_au``: the human-facing AU display
+    format isn't sortable (see there), so anything that needs chronological
+    ordering as plain text — currently just ``EscalationRecord.queue_key`` —
+    builds its sort key from the raw epoch here instead of from a record's
+    (AU-formatted) ``created_at``.
+    """
+    return f"{epoch_seconds:011d}"
 
 
 class PolicyStatus(StrEnum):
@@ -171,7 +204,7 @@ class Claim:
     status: ClaimStatus
     incident_date: str  # ISO date string
     incident_location: str
-    created_at: int  # epoch seconds
+    created_at: str  # AU (Sydney-local) datetime, e.g. "02/09/2026 14:30:00 AEST"
     garage_name: str = ""
     tow_required: bool | None = None
     estimated_cost: str | None = None
@@ -208,7 +241,7 @@ class Claim:
             status=ClaimStatus(item["status"]),
             incident_date=item.get("incidentDate", ""),
             incident_location=item.get("incidentLocation", ""),
-            created_at=int(item.get("createdAt", 0)),
+            created_at=str(item.get("createdAt", "")),
             garage_name=item.get("garageName", ""),
             tow_required=item.get("towRequired"),
             estimated_cost=item.get("estimatedCost"),
@@ -230,8 +263,8 @@ class EscalationRecord:
     session_id: str
     reason: str  # a HandoffReason value
     status: EscalationStatus
-    queue_key: str  # status-index range key: f"{priority:02d}#{created_at:011d}"
-    created_at: int  # epoch seconds
+    queue_key: str  # status-index range key: f"{priority:02d}#{epoch_to_sort_key(now)}" (not created_at -- that's AU-formatted and not sortable)
+    created_at: str  # AU (Sydney-local) datetime, e.g. "02/09/2026 14:30:00 AEST"
     caller_number: str | None
     verified: bool
     policy_id: str | None
@@ -240,9 +273,9 @@ class EscalationRecord:
     transcript_tail: list[str] = field(default_factory=list)
     channel: str = ""
     channel_ref: str = ""
-    ttl: int = 0  # epoch seconds
+    ttl: int = 0  # epoch seconds -- DynamoDB TTL requires this, must stay a raw epoch int
     assigned_agent_id: str | None = None  # agent offered/claimed this row (Milestone F)
-    claimed_at: int | None = None  # epoch seconds; set by EscalationRepository.claim()
+    claimed_at: str | None = None  # AU (Sydney-local) datetime; set by EscalationRepository.claim()
 
     def to_item(self) -> dict[str, Any]:
         """Serialise to a DynamoDB item (omitting ``None`` optional fields)."""
@@ -283,7 +316,7 @@ class EscalationRecord:
             reason=item["reason"],
             status=EscalationStatus(item["status"]),
             queue_key=item["queueKey"],
-            created_at=int(item.get("createdAt", 0)),
+            created_at=str(item.get("createdAt", "")),
             caller_number=item.get("callerNumber"),
             verified=bool(item.get("verified", False)),
             policy_id=item.get("policyId"),
@@ -317,10 +350,10 @@ class AgentRecord:
 
     agent_id: str
     status: AgentStatus
-    last_heartbeat: int  # epoch seconds
+    last_heartbeat: str  # AU (Sydney-local) datetime, e.g. "02/09/2026 14:30:00 AEST"
     connection_id: str | None = None
     current_escalation_id: str | None = None
-    ttl: int = 0  # epoch seconds
+    ttl: int = 0  # epoch seconds -- DynamoDB TTL requires this, must stay a raw epoch int
 
     def to_item(self) -> dict[str, Any]:
         """Serialise to a DynamoDB item (omitting ``None`` optional fields)."""
@@ -342,7 +375,7 @@ class AgentRecord:
         return cls(
             agent_id=item["agentId"],
             status=AgentStatus(item["status"]),
-            last_heartbeat=int(item.get("lastHeartbeat", 0)),
+            last_heartbeat=str(item.get("lastHeartbeat", "")),
             connection_id=item.get("connectionId"),
             current_escalation_id=item.get("currentEscalationId"),
             ttl=int(item.get("ttl", 0)),
@@ -363,9 +396,9 @@ class CallbackRecord:
     callback_id: str
     mobile_no: str
     reason: str  # a HandoffReason value
-    created_at: int  # epoch seconds
+    created_at: str  # AU (Sydney-local) datetime, e.g. "02/09/2026 14:30:00 AEST"
     status: CallbackStatus
-    ttl: int = 0  # epoch seconds
+    ttl: int = 0  # epoch seconds -- DynamoDB TTL requires this, must stay a raw epoch int
 
     def to_item(self) -> dict[str, Any]:
         """Serialise to a DynamoDB item."""
@@ -385,7 +418,7 @@ class CallbackRecord:
             callback_id=item["callbackId"],
             mobile_no=item["mobileNo"],
             reason=item["reason"],
-            created_at=int(item.get("createdAt", 0)),
+            created_at=str(item.get("createdAt", "")),
             status=CallbackStatus(item["status"]),
             ttl=int(item.get("ttl", 0)),
         )
@@ -408,8 +441,8 @@ class OtpChallenge:
     code_salt: str
     status: OtpStatus
     attempts: int = 0
-    created_at: int = 0  # epoch seconds
-    ttl: int = 0  # epoch seconds
+    created_at: str = ""  # AU (Sydney-local) datetime, e.g. "02/09/2026 14:30:00 AEST"
+    ttl: int = 0  # epoch seconds -- DynamoDB TTL requires this, must stay a raw epoch int
 
     def to_item(self) -> dict[str, Any]:
         """Serialise to a DynamoDB item."""
@@ -436,6 +469,6 @@ class OtpChallenge:
             code_salt=item["codeSalt"],
             status=OtpStatus(item["status"]),
             attempts=int(item.get("attempts", 0)),
-            created_at=int(item.get("createdAt", 0)),
+            created_at=str(item.get("createdAt", "")),
             ttl=int(item.get("ttl", 0)),
         )

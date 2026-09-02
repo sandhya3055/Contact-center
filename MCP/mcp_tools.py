@@ -56,7 +56,14 @@ from typing import Any
 
 from app.config import AppConfig, load_config
 from app.data.escalations import EscalationRepository
-from app.data.models import ClaimStatus, ClaimType, EscalationRecord, EscalationStatus
+from app.data.models import (
+    ClaimStatus,
+    ClaimType,
+    EscalationRecord,
+    EscalationStatus,
+    epoch_to_au,
+    epoch_to_sort_key,
+)
 from app.tools.claim_tools import (
     ClaimSlots,
     check_duplicate_claim,
@@ -199,13 +206,17 @@ def _register_claim(config: AppConfig, event: dict) -> dict:
 def _escalate(config: AppConfig, event: dict) -> dict:
     reason = event.get("reason") or "caller_requested"
     now = int(time.time())
+    # now stays a raw epoch int here -- ttl below requires it (DynamoDB TTL only
+    # works with epoch seconds), and queue_key's sort order needs it too (the
+    # AU-formatted created_at below isn't lexicographically sortable, see
+    # epoch_to_sort_key).
     record = EscalationRecord(
         escalation_id=str(uuid.uuid4()),
         session_id=event["session_id"],
         reason=reason,
         status=EscalationStatus.QUEUED,
-        queue_key=f"{_QUEUE_PRIORITY:02d}#{now:011d}",
-        created_at=now,
+        queue_key=f"{_QUEUE_PRIORITY:02d}#{epoch_to_sort_key(now)}",
+        created_at=epoch_to_au(now),
         caller_number=event.get("caller_number"),
         verified=bool(event.get("verified", False)),
         policy_id=event.get("policy_id"),
