@@ -153,6 +153,45 @@ To redeploy after a code change: rebuild + push the image (step 1), then
 `aws bedrock-agentcore-control update-agent-runtime` with the same
 `--agent-runtime-artifact`.
 
+### Observability (tool calls in the trace)
+
+Out of the box a trace contains exactly one span, `AgentCore.Runtime.Invoke`
+— the platform's own. Getting the orchestration flow (`bidi_session`, and an
+`execute_tool` child per tool call carrying its arguments) needs three things:
+
+1. **`AGENT_OBSERVABILITY_ENABLED=true`** in the runtime's environment
+   variables — this is what `_setup_telemetry()` in `strands_agent.py` gates
+   on. Also set `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
+   (puts tool arguments in the queryable `gen_ai.tool.call.arguments`
+   attribute) and `OTEL_SERVICE_NAME=ava-voice-agent`.
+2. **`xray:PutTraceSegments`** on the execution role (the `Observability`
+   statement in `permissions-policy.json`).
+3. **Transaction Search enabled** in CloudWatch. Check with
+   `aws xray get-trace-segment-destination --region us-west-2`; it must
+   report `"Destination": "CloudWatchLogs", "Status": "ACTIVE"`.
+
+Do **not** set `OTEL_EXPORTER_OTLP_ENDPOINT`. AgentCore Runtime does not run
+an OTLP collector inside a custom container — pointing the exporter at the
+conventional `localhost:4318` gets `Connection refused` on every batch, and
+the spans are silently dropped after being correctly created. Traces go
+straight to CloudWatch's own OTLP endpoint,
+`https://xray.<region>.amazonaws.com/v1/traces`, which `_setup_telemetry()`
+builds itself and SigV4-signs with botocore. No ADOT distro and no
+`opentelemetry-instrument` wrapper: the OTel SDK, the OTLP exporter and the
+signer are already installed.
+
+Spans land in the `aws/spans` log group. To confirm delivery without opening
+the console:
+
+```bash
+aws logs filter-log-events --region us-west-2 --log-group-name aws/spans \
+  --start-time $(python3 -c "import time;print(int((time.time()-900)*1000))") \
+  --filter-pattern '"ava-voice-agent"' --max-items 5 --query 'events[].message' --output text
+```
+
+Container-side problems show up in the runtime log group — grep it for
+`[telemetry]` (setup outcome) and `export span batch` (delivery failures).
+
 ## 4. Deploy the Lambda
 
 ```bash

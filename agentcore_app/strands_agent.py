@@ -186,7 +186,32 @@ Escalate when the caller asks for a person, wants something you can't do, sounds
 Business rules. Identify the caller with a lookup before discussing account details or taking a claim — that lookup is the identity check, so don't mention or repeat it. Never look up a number the caller hasn't spoken and confirmed digit by digit in this call. If nothing is found, re-check what you sent, then say so plainly and offer a teammate. If there's more than one policy or vehicle, ask which the call is about. An open claim anywhere on the account blocks all new claims — open means anything not closed, settled, paid, rejected or withdrawn, including statuses you don't recognise — and while one exists, don't offer or mention registering another. Never invent policy, claim or account information. If a tool result and the caller disagree, escalate rather than overwrite or argue.
 """.strip()
 
-_bedrock_agent_client = boto3.client("bedrock-agent", region_name=BEDROCK_REGION) if BEDROCK_PROMPT_ID else None
+def _prompt_region() -> str:
+    """Region to reach Bedrock Prompt Management in.
+
+    Deliberately *not* BEDROCK_REGION: that one is Nova Sonic's region
+    (us-east-1 here), which has nothing to do with where the prompt lives.
+    Pointing the client at the wrong region fails in a genuinely misleading
+    way -- the request is signed for the calling region, so the service
+    resolves the resource against *that* region and IAM reports a plain
+    `AccessDeniedException: not authorized to perform: bedrock:GetPrompt`
+    even when the policy grants exactly this prompt. It reads as a missing
+    permission and is not one.
+
+    A prompt id can be given either as a bare id or a full ARN; when it is an
+    ARN its own region is authoritative, since that is where the resource
+    actually is. Otherwise fall back to this deployment's AWS_REGION.
+    """
+    if BEDROCK_PROMPT_ID and BEDROCK_PROMPT_ID.startswith("arn:"):
+        parts = BEDROCK_PROMPT_ID.split(":")
+        if len(parts) > 3 and parts[3]:
+            return parts[3]
+    return GATEWAY_REGION
+
+
+_bedrock_agent_client = (
+    boto3.client("bedrock-agent", region_name=_prompt_region()) if BEDROCK_PROMPT_ID else None
+)
 
 
 def _fetch_prompt_template() -> str:
@@ -1161,35 +1186,105 @@ sonic_model = BidiNovaSonicModel(
     client_config={"region": BEDROCK_REGION},
 )
 
+class _XRaySigV4Auth:
+    """SigV4-sign each OTLP span-export POST for the CloudWatch X-Ray endpoint.
+
+    A ``requests.auth.AuthBase``-shaped callable (duck-typed, so ``requests``
+    stays an implicit dependency rather than an imported one). ``requests``
+    invokes it during ``PreparedRequest`` construction -- after the body is
+    set, before the send -- which is exactly when the payload is final and
+    signable, gzip already applied.
+
+    Only ``Content-Type`` is put into the signature. The X-Ray endpoint
+    validates ``SignedHeaders`` strictly, and ``requests`` appends
+    ``Content-Length``/``User-Agent``/``Accept-Encoding`` *after* this hook
+    runs -- signing over those would produce a signature the endpoint cannot
+    reproduce.
+
+    Credentials are re-frozen per request rather than captured once: the
+    runtime's task role hands out short-lived credentials that boto3 rotates
+    underneath us, and a long-running call outlives a single set.
+    """
+
+    def __init__(self, region: str) -> None:
+        import boto3
+
+        self._region = region
+        self._credentials = boto3.Session().get_credentials()
+
+    def __call__(self, request):
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        signed = AWSRequest(
+            method=request.method,
+            url=request.url,
+            data=request.body,
+            headers={"Content-Type": request.headers.get("Content-Type", "")},
+        )
+        SigV4Auth(
+            self._credentials.get_frozen_credentials(), "xray", self._region
+        ).add_auth(signed)
+        for header in ("Authorization", "X-Amz-Date", "X-Amz-Security-Token"):
+            if header in signed.headers:
+                request.headers[header] = signed.headers[header]
+        return request
+
+
 def _setup_telemetry() -> None:
-    """Point Strands' spans at AgentCore Runtime's own OTLP collector.
+    """Export Strands' spans to CloudWatch GenAI Observability.
 
     Strands already instruments the whole call on its own -- a `bidi_session`
     span per connection, an `execute_tool` child span per tool call carrying
     the tool's name, arguments and result, plus response spans and
     interruption events. What it does *not* do is decide where those go: it
     emits against whatever global TracerProvider exists, and with none
-    configured that is a no-op provider that silently drops every span. That
-    is the whole reason traces never appeared.
+    configured that is a no-op provider that silently drops every span.
 
-    This installs the real provider and OTLP exporter in-process, which is all
-    that was missing -- no ADOT distro, no `opentelemetry-instrument`
-    wrapper. The OTel SDK and OTLP exporter already ship inside
-    strands-agents, and the collector endpoint is supplied by the runtime
-    itself via OTEL_EXPORTER_OTLP_ENDPOINT.
+    AgentCore Runtime does *not* run an OTLP collector inside a custom
+    container -- verified the hard way: pointing the exporter at the
+    conventional `localhost:4318` produced `Connection refused` on every
+    batch while the spans themselves were being created correctly. Traces
+    instead go straight to CloudWatch's own OTLP endpoint,
+    `https://xray.<region>.amazonaws.com/v1/traces`, which needs SigV4
+    signing (see `_XRaySigV4Auth`) and the execution role's
+    `xray:PutTraceSegments`. That endpoint is what backs the same
+    GenAI Observability console the platform's own `AgentCore.Runtime.Invoke`
+    span shows up in, so the agent's spans land as children of it rather
+    than in a separate system -- no ADOT distro and no
+    `opentelemetry-instrument` wrapper needed; the OTel SDK, the OTLP
+    exporter and botocore's signer are all already installed.
 
-    Skipped entirely when that endpoint is absent (i.e. running locally),
-    where there is nothing to export to and the no-op provider is the
-    correct, quiet behaviour.
+    Gated on AGENT_OBSERVABILITY_ENABLED so a local run stays quiet: there
+    the no-op provider is the correct behaviour, and nothing should be
+    shipping a developer's test calls to CloudWatch.
     """
-    if not (os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")):
-        print("[telemetry] no OTLP endpoint set — tracing off (expected outside AgentCore Runtime)")
+    if os.getenv("AGENT_OBSERVABILITY_ENABLED", "").lower() not in ("true", "1", "yes"):
+        print("[telemetry] AGENT_OBSERVABILITY_ENABLED not set — tracing off (expected outside AgentCore Runtime)")
         return
     try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from strands.telemetry import StrandsTelemetry
 
-        StrandsTelemetry().setup_otlp_exporter()
-        print("[telemetry] OTLP exporter configured — Strands spans will be exported")
+        # GATEWAY_REGION is this deployment's AWS_REGION -- the region whose
+        # CloudWatch console shows the runtime's own AgentCore.Runtime.Invoke
+        # span, so the agent's spans have to land in the same one to join it.
+        region = os.getenv("XRAY_REGION") or GATEWAY_REGION
+        endpoint = f"https://xray.{region}.amazonaws.com/v1/traces"
+
+        exporter = OTLPSpanExporter(endpoint=endpoint)
+        # The auth hook has to hang off the exporter's own session; there is
+        # no constructor argument for it.
+        exporter._session.auth = _XRaySigV4Auth(region)
+
+        # StrandsTelemetry() builds the provider with Strands' resource
+        # attributes and registers it globally, which is the half that was
+        # missing. Its own setup_otlp_exporter() is deliberately not used --
+        # it builds an unsigned exporter from OTEL_EXPORTER_OTLP_ENDPOINT.
+        telemetry = StrandsTelemetry()
+        telemetry.tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+        print(f"[telemetry] exporting spans to {endpoint} (SigV4)")
     except Exception as e:
         # Losing traces is not worth losing calls over.
         print(f"[telemetry] setup failed, continuing without tracing: {e}")
