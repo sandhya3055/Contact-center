@@ -38,4 +38,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/ping').read()"]
 
+# Plain uvicorn, deliberately: tracing is wired up in-process by
+# StrandsTelemetry at startup (see strands_agent.py), pointed at the OTLP
+# endpoint AgentCore Runtime provides. No ADOT distro and no
+# opentelemetry-instrument wrapper — the OTel SDK and OTLP exporter already
+# ship with strands-agents.
 CMD ["uvicorn", "strands_agent:app", "--host", "0.0.0.0", "--port", "8080"]

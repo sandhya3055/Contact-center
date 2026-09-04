@@ -90,6 +90,24 @@ OUTPUT_SAMPLE_RATE = int(os.getenv("OUTPUT_SAMPLE_RATE", "16000"))
 BEDROCK_PROMPT_ID = os.getenv("BEDROCK_PROMPT_ID")
 BEDROCK_PROMPT_VERSION = os.getenv("BEDROCK_PROMPT_VERSION")  # omit for the DRAFT version
 
+# Optional: AgentCore Memory resource id for cross-call recall — what lets a
+# caller who rang before be recognized on a later call. Blank (the default)
+# disables it entirely: nothing is written, nothing is retrieved, and a call
+# runs exactly as it did before. Every memory call below is also wrapped so a
+# failure degrades to "no memory this call" rather than dropping the call —
+# recall is a nicety, the call is not.
+#
+# Scoping: actorId is the caller's confirmed mobile number (the only stable
+# caller identity this system has), sessionId is one call. Nothing is written
+# under a number that was never confirmed by a successful lookup, so an
+# unverified caller can neither read nor pollute another number's memory.
+MEMORY_ID = os.getenv("MEMORY_ID", "")
+MEMORY_REGION = os.getenv("MEMORY_REGION", GATEWAY_REGION)
+# How many recalled records to fold into the greeting context. Small on
+# purpose: this rides along in the model's first turn, and a long list of
+# half-relevant facts is worse than a couple of sharp ones.
+MEMORY_RECALL_TOP_K = int(os.getenv("MEMORY_RECALL_TOP_K", "5"))
+
 # Untrusted tool output (G2.18): a tool result comes from the gateway's
 # backend, not from the caller or the model — but it's still external input
 # that could be malformed, compromised, or (for a third-party MCP server)
@@ -155,83 +173,17 @@ HIGH_VALUE_CLAIM_THRESHOLD = 100_000
 
 
 SYSTEM_INSTRUCTION = """
-You are Ava, the AI assistant for the contact center. You speak with callers
-over voice, so keep every response short, natural, and conversational — a
-sentence or two at a time. Never use lists, headings, or symbols that can't
-be spoken aloud.
-
-At the very start of the conversation, introduce yourself in one short
-sentence, then ask for the caller's mobile number:
-"Hi, I'm Ava, your AI Assistant. I can help you with your policy details,
-register a claim, or connect you with a human agent. First, could I get
-your mobile number?"
-
-Your tools come from the gateway, and each one's own description tells you
-exactly what it does and what it needs — read those descriptions, don't
-assume. In general terms, you can look up a caller's policy by mobile
-number, register a claim against a verified policy, and escalate to a human
-agent. Decide for yourself, from what the caller actually says, which tool
-to use and when — there is no fixed script to follow.
-
-Looking up a policy by mobile number doubles as your identity check —
-there's no separate verification step or date of birth needed: a caller who
-confirms a mobile number matching an active policy is treated as verified
-for that policy. Long digit sequences spoken one at a time are easy to
-mishear (a trailing digit especially can get dropped), so read the number
-back digit by digit and get an explicit yes before calling the lookup tool,
-the same way you'd confirm any other critical detail (a claim's incident
-date, a vehicle registration) before submitting it. If the caller doesn't
-clearly say yes but instead corrects you or restates the number, that
-restatement is itself unconfirmed — read the new version back and ask again,
-and keep looping until you get an explicit yes. Never call the lookup tool
-on a number you haven't had confirmed back to you. Look up the policy before
-discussing policy details or accepting a claim, and don't ask the caller to
-re-verify later in the same call. If no policy is found, double-check the
-number was heard correctly before telling the caller. If a caller has more
-than one policy or vehicle, ask which one the call is about before
-continuing.
-
-Any identifier you say aloud — a policy number, claim number, vehicle
-registration, or similar code — should be spoken one character at a time
-(e.g. "three two three one four", not "three thousand two hundred and
-thirty-one"), the same way you already do for mobile numbers. This applies
-whether you're reading one back to confirm it or stating one to the caller.
-
-When the caller wants to register a claim, check first: the policy lookup
-may already show an existing or open claim on that policy or vehicle — read
-it before asking anything else. If one is already there, tell the caller
-right away and share whatever claim id or status you have, instead of
-collecting a full set of incident details first and only then discovering
-it's a duplicate. Only move on to collecting new details if there's
-genuinely no existing claim, or the caller makes clear this is a separate,
-new incident. This same check-before-you-ask habit applies to any action,
-not just claims: confirm what's already true before running the caller
-through questions whose answers might turn out not to matter.
-
-When registering a claim, use the policy id and vehicle details from the
-lookup — don't take a policy id the caller just states blind. Read the
-details back to confirm before submitting. If the claim tool itself reports
-one already exists — found only at that point, after you've already asked
-for details — stop there: don't ask the caller to repeat anything, just
-tell them what's already on file.
-
-If a claim's estimated cost is ₹1,00,000 or more, you cannot register it
-yourself no matter how straightforward it seems — tell the caller a
-specialist needs to review a claim of that size, and escalate them to a
-human agent with the details you've already gathered, the same way you
-would for any other escalation.
-
-Use your judgment on when to escalate to a human agent: the caller directly
-asks for a person, their request is outside what your tools can help with,
-a tool keeps failing, or the caller sounds frustrated or unsatisfied after
-a couple of attempts. When you do, summarize what the caller wants and what
-you've already found out so the human agent has full context and the
-caller never has to repeat themselves. After escalating, tell the caller —
-in your own words — that you're connecting them with a teammate who has the
-full picture.
-
-Never fabricate policy, claim, or account information. If you're unsure what
-the caller means, ask a clarifying question rather than guessing.
+You are Ava, a voice assistant for a contact center. Every word you write is spoken aloud by a text-to-speech engine. There is no private channel — no reasoning, plans, notes, labels, field names, or raw tool output. Write only what a human agent would say.
+Open with exactly: "Hi, I'm Ava, your AI Assistant. I can help with your policy details, register a claim, or connect you with a human agent." Then listen. Never repeat that list; if you're unsure what they want, ask "What would you like to do next?"
+One thing at a time. Each reply asks for at most one thing and contains at most one question mark. Six values needed means six replies. Ask once — don't rephrase the same question. If the caller is mid-sentence or you caught only a fragment, wait.
+Speak like a person. One or two sentences, then stop. Contractions, ordinary words. Acknowledge briefly and differently each time ("got it", "right", "thanks"). Say dates and amounts naturally — "the sixteenth of August", not "2026-08-16". Don't narrate your process, name a tool, or say you're checking a system.
+Never say: "sorry" at the start of a turn; "I just need a few details"; "verify" / "confirm your identity" / "for security"; "I can help with that" before you've checked; "you'll need to contact customer service."
+Confirm what you heard. Read back and get an explicit yes before using anything spelled or recited, any run of digits, date, address, place name, or amount. Say ids one character at a time. "Yesterday" or "last Tuesday" isn't a date until you've said the actual day and month back and had a yes. A correction replaces the old value completely and needs its own readback and yes.
+Never invent a value. Everything you submit comes from something the caller said or an earlier result — never a guess, an example from a description, or a placeholder like "unknown" or "n/a". If a tool wants a description or explanation, ask an open question and use their words; never write it yourself.
+Only say something can be done once you've checked it can. If something blocks the action, say so immediately and collect nothing. If you can't do it: "I'm not able to do that myself, so I'll pass this to one of my colleagues" — then actually hand off. Don't promise what the colleague will do or when.
+Three attempts, then a person. After the third failure at the same thing: "I've not been able to get this right, so I'll bring in a colleague who can." Say it once, escalate, don't reopen. Insisting doesn't reset the count.
+Escalate when the caller asks for a person, wants something you can't do, sounds frustrated, disputes a block, or a tool fails twice (retry once first). Send a summary so they never repeat themselves, then stay on the line and start nothing new. If escalation fails, retry once, say you couldn't reach anyone, then ESCALATION_FALLBACK_INSTRUCTION.
+Business rules. Identify the caller with a lookup before discussing account details or taking a claim — that lookup is the identity check, so don't mention or repeat it. Never look up a number the caller hasn't spoken and confirmed digit by digit in this call. If nothing is found, re-check what you sent, then say so plainly and offer a teammate. If there's more than one policy or vehicle, ask which the call is about. An open claim anywhere on the account blocks all new claims — open means anything not closed, settled, paid, rejected or withdrawn, including statuses you don't recognise — and while one exists, don't offer or mention registering another. Never invent policy, claim or account information. If a tool result and the caller disagree, escalate rather than overwrite or argue.
 """.strip()
 
 _bedrock_agent_client = boto3.client("bedrock-agent", region_name=BEDROCK_REGION) if BEDROCK_PROMPT_ID else None
@@ -279,6 +231,71 @@ async def get_system_prompt() -> str:
     except Exception as e:
         print(f"[prompt] failed to fetch {BEDROCK_PROMPT_ID!r} from Bedrock Prompt Management, falling back to SYSTEM_INSTRUCTION: {e}")
         return SYSTEM_INSTRUCTION
+
+
+def build_memory_session_manager(actor_id: str, session_id: str):
+    """The AgentCore Memory session manager for this call, or None when memory
+    is switched off (MEMORY_ID unset) or unavailable.
+
+    Both halves of memory come from this one object, handled by the SDK rather
+    than by hand here:
+
+    - Session (short-term): every turn of this call is persisted under
+      `session_id`, so the conversation survives a dropped socket and is
+      readable afterwards instead of living only in this process.
+    - Long-term: AgentCore extracts durable records from past calls
+      (preferences, facts, per-call summaries) and the manager retrieves the
+      relevant ones and injects them into the model's context automatically —
+      which is what makes a returning caller's experience personalised without
+      Ava having to ask them everything again.
+
+    `async_mode=True` matters here specifically: this runs inside a live voice
+    call, and it offloads the per-turn boto3 calls to threads so the asyncio
+    loop driving the audio stream is never blocked waiting on AWS.
+
+    Returns None rather than raising if anything goes wrong — a caller losing
+    memory is a degraded call; a caller losing the call is a failed one.
+    """
+    if not MEMORY_ID:
+        return None
+    try:
+        from bedrock_agentcore.memory.integrations.strands.config import (
+            AgentCoreMemoryConfig,
+            RetrievalConfig,
+        )
+        from bedrock_agentcore.memory.integrations.strands.session_manager import (
+            AgentCoreMemorySessionManager,
+        )
+    except ImportError as e:
+        print(f"[memory] bedrock-agentcore not installed, running without memory: {e}")
+        return None
+
+    try:
+        config = AgentCoreMemoryConfig(
+            memory_id=MEMORY_ID,
+            actor_id=actor_id,
+            session_id=session_id,
+            # Namespaces must match the strategies the memory resource was
+            # created with (see MEMORY_SETUP.md). Preferences are retrieved
+            # with a higher relevance bar than facts: a wrong "prefers
+            # cashless" colours the whole call, while a stale fact is usually
+            # just ignored.
+            retrieval_config={
+                "/preferences/{actorId}/": RetrievalConfig(
+                    top_k=MEMORY_RECALL_TOP_K, relevance_score=0.7
+                ),
+                "/facts/{actorId}/": RetrievalConfig(
+                    top_k=MEMORY_RECALL_TOP_K, relevance_score=0.5
+                ),
+            },
+            async_mode=True,
+        )
+        manager = AgentCoreMemorySessionManager(config, region_name=MEMORY_REGION)
+        print(f"[memory] session manager ready (actor={actor_id}, session={session_id})")
+        return manager
+    except Exception as e:
+        print(f"[memory] could not start session manager, running without memory: {e}")
+        return None
 
 
 class _LoggingTool(AgentTool):
@@ -1144,6 +1161,42 @@ sonic_model = BidiNovaSonicModel(
     client_config={"region": BEDROCK_REGION},
 )
 
+def _setup_telemetry() -> None:
+    """Point Strands' spans at AgentCore Runtime's own OTLP collector.
+
+    Strands already instruments the whole call on its own -- a `bidi_session`
+    span per connection, an `execute_tool` child span per tool call carrying
+    the tool's name, arguments and result, plus response spans and
+    interruption events. What it does *not* do is decide where those go: it
+    emits against whatever global TracerProvider exists, and with none
+    configured that is a no-op provider that silently drops every span. That
+    is the whole reason traces never appeared.
+
+    This installs the real provider and OTLP exporter in-process, which is all
+    that was missing -- no ADOT distro, no `opentelemetry-instrument`
+    wrapper. The OTel SDK and OTLP exporter already ship inside
+    strands-agents, and the collector endpoint is supplied by the runtime
+    itself via OTEL_EXPORTER_OTLP_ENDPOINT.
+
+    Skipped entirely when that endpoint is absent (i.e. running locally),
+    where there is nothing to export to and the no-op provider is the
+    correct, quiet behaviour.
+    """
+    if not (os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")):
+        print("[telemetry] no OTLP endpoint set — tracing off (expected outside AgentCore Runtime)")
+        return
+    try:
+        from strands.telemetry import StrandsTelemetry
+
+        StrandsTelemetry().setup_otlp_exporter()
+        print("[telemetry] OTLP exporter configured — Strands spans will be exported")
+    except Exception as e:
+        # Losing traces is not worth losing calls over.
+        print(f"[telemetry] setup failed, continuing without tracing: {e}")
+
+
+_setup_telemetry()
+
 app = FastAPI()
 
 
@@ -1169,6 +1222,18 @@ async def voice_chat(websocket: WebSocket) -> None:
     )
     voice_agent: BidiAgent | None = None
 
+    # One memory session per call: this is what the call's turns are stored
+    # under, and what a session summary is later extracted from.
+    memory_session_id = str(uuid.uuid4())
+
+    # Single-item mutable box (not a plain variable) so build_gateway_tools
+    # -- which is already running as a background task by the time
+    # mobile_number below is known -- and the seeding step further down
+    # both observe the same live value rather than each getting a frozen
+    # copy from whenever they captured it. Also out here so the memory
+    # write at teardown can read the final confirmed number.
+    known_mobile_number: list[str | None] = [None]
+
     # build_gateway_tools() -> load_tools() starts mcp_client's own
     # background connection lazily; wrapping this in `with mcp_client:`
     # too would start it twice and raise. mcp_client.stop() below is the
@@ -1179,13 +1244,6 @@ async def voice_chat(websocket: WebSocket) -> None:
         # latency on top of accept() before the caller's mic could even
         # start streaming.
         recent_digits = _RecentUserDigits()
-
-        # Single-item mutable box (not a plain variable) so build_gateway_tools
-        # -- which is already running as a background task by the time
-        # mobile_number below is known -- and the seeding step further down
-        # both observe the same live value rather than each getting a frozen
-        # copy from whenever they captured it.
-        known_mobile_number: list[str | None] = [None]
 
         async def notify_mobile_number(value: str) -> None:
             # Best-effort: a send failing here (e.g. the socket closed mid-call)
@@ -1236,12 +1294,11 @@ async def voice_chat(websocket: WebSocket) -> None:
             "\"three days ago\") against this, in ISO 8601 (YYYY-MM-DD) format "
             "for any tool argument — never invent a date."
         )
-        voice_agent = BidiAgent(
-            model=sonic_model,
-            tools=[*tools, stop_conversation],
-            system_prompt=system_prompt,
-        )
-
+        # Resolved before the agent is built, not after: the memory session
+        # manager needs the caller's number as its actor id at construction
+        # time, since that's the key both this call's history and any earlier
+        # call's extracted memory are stored under.
+        #
         # Only digits/+/space/dash, a plausible phone length: anything else
         # (including an attempted prompt injection typed into the field —
         # this reaches the model as literal text below) is dropped, and the
@@ -1259,6 +1316,36 @@ async def voice_chat(websocket: WebSocket) -> None:
         if mobile_number:
             recent_digits.seed(mobile_number)
             known_mobile_number[0] = mobile_number
+
+        # A caller who didn't pre-fill their number gets a per-call actor id
+        # instead: this call still gets session memory (and shows up whole in
+        # observability), but there's nothing stable to tie it to a previous
+        # or future call, which is the honest outcome -- guessing an identity
+        # here would attach one caller's history to another's.
+        memory_actor_id = mobile_number or f"anonymous-{memory_session_id}"
+
+        # Both built on a worker thread, not the event loop: creating the
+        # session manager reads this actor's existing events from AWS, and
+        # constructing the agent with one attached does further blocking
+        # session/history reads that Strands won't dispatch asynchronously
+        # (async_mode only covers the per-turn calls once the call is
+        # running). There is already a caller on this socket, so a blocked
+        # loop here is dead air.
+        def _build_agent() -> BidiAgent:
+            return BidiAgent(
+                model=sonic_model,
+                tools=[*tools, stop_conversation],
+                system_prompt=system_prompt,
+                session_manager=build_memory_session_manager(
+                    memory_actor_id, memory_session_id
+                ),
+                # Named so the session/response spans Strands emits are
+                # identifiable per call in CloudWatch rather than anonymous.
+                agent_id="ava-voice-agent",
+                name="Ava",
+            )
+
+        voice_agent = await asyncio.to_thread(_build_agent)
 
         # Nova Sonic only speaks in response to a turn it detects — without
         # this nudge Ava sits silently until the caller says something first,
@@ -1296,6 +1383,11 @@ async def voice_chat(websocket: WebSocket) -> None:
             )
         else:
             greeting_text = "(the call has just connected — begin now)"
+
+        # Nothing about recalled memory is spliced in here: the session manager
+        # retrieves what it needs and injects it into the model's context
+        # itself, wrapped in its own tag, so the kickoff text stays purely
+        # about this call.
         greeted = False
 
         async def receive_with_greeting_kickoff():
@@ -1330,6 +1422,9 @@ async def voice_chat(websocket: WebSocket) -> None:
 
         traceback.print_exc()
     finally:
+        # No explicit memory write here: the session manager persists each turn
+        # as it happens, so a call that drops mid-sentence keeps everything said
+        # up to that point rather than losing it all at teardown.
         try:
             await websocket.close()
         except Exception:

@@ -3,6 +3,9 @@ mcp-proxy-for-aws==1.6.4    # aws_iam_streamablehttp_client — signs gateway MC
 fastapi                     # Web framework
 uvicorn[standard]           # ASGI server (includes websockets)
 boto3                       # bedrock-agent client, for optional Bedrock Prompt Management fetch
+bedrock-agentcore[strands-agents]  # AgentCoreMemorySessionManager — session (short-term) + long-term
+                            # caller memory. Only imported when MEMORY_ID is set; the call runs
+                            # without it otherwise (see build_memory_session_manager).
 python-dotenv               # loads ../.env for local dev only (no-op in the deployed container)
 pyaudio==0.2.14             # Audio I/O (required by BidiAgent even though this container has no mic/speakers).
                             # Pinned: 0.2.14 is the version already verified to build cleanly (used by
