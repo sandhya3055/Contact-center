@@ -8,7 +8,7 @@ event itself is the tool's raw input). Mirrors the existing single-Lambda patter
 feature (which has no way to set ``client_context``) can invoke a specific tool
 directly -- see ``_tool_name``.
 
-Three tools, deliberately scoped down from the full BUILD_SPEC §8 tool set (Opus
+Four tools, deliberately scoped down from the full BUILD_SPEC §8 tool set (Opus
 review, D103):
 
   - ``get_policy``: read-only, wraps ``lookup_policy_by_number``. Requires both
@@ -21,6 +21,17 @@ review, D103):
     ``open_claims`` (via ``list_claims_for_vehicle``, filtered to non-``CLOSED``) so
     a caller/agent can see a claim already in flight before attempting
     ``register_claim``.
+  - ``verify_dob``: read-only, the same DOB match ``get_policy`` performs, but
+    answered on its own -- a caller/agent that has a number and a spoken date of
+    birth can check whether the two belong together before asking ``get_policy``
+    for any policy detail. Optionally also matches ``full_name``, in which case it
+    delegates to ``verify_dob_name`` (ACTIVE policies only, name compared
+    case-insensitively/trimmed -- rule #6/#7); DOB alone is matched across all
+    policies on the number, exactly as ``get_policy`` filters. The response carries
+    only ``verified``/``has_active``/``policy_ids`` -- never a name, DOB or any
+    other policy field -- so a wrong guess confirms nothing beyond its own
+    wrongness, and the tool can't be used to read a holder's details out of a
+    number.
   - ``register_claim``: wraps ``create_claim_pending``, guarded by
     ``check_duplicate_claim`` first (vehicle_reg is the natural idempotency key here
     -- a vehicle can't hold two open claims anyway). Still has no consent gate or
@@ -70,7 +81,7 @@ from app.tools.claim_tools import (
     create_claim_pending,
     list_claims_for_vehicle,
 )
-from app.tools.policy_tools import lookup_policy_by_number
+from app.tools.policy_tools import lookup_policy_by_number, verify_dob_name
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +159,20 @@ def _validate_dob(dob: str | None) -> str:
     return dob
 
 
+def _validate_full_name(full_name: Any) -> str | None:
+    """Validate the optional ``full_name`` field; ``None`` when not supplied.
+
+    An empty/whitespace-only string is treated as "not supplied" rather than an
+    error -- an STT transcript can easily yield one, and the DOB-only check is a
+    valid answer to that -- but a non-string is a malformed call.
+    """
+    if full_name is None:
+        return None
+    if not isinstance(full_name, str):
+        raise ValueError("invalid full_name")
+    return full_name.strip() or None
+
+
 def _policy_view(config: AppConfig, policy: Any) -> dict:
     """Whitelist a :class:`Policy` down to fields safe for an external MCP client.
 
@@ -173,13 +198,43 @@ def _claim_view(claim: Any) -> dict:
 
 def _get_policy(config: AppConfig, event: dict) -> dict:
     number = _validate_number(event.get("number"))
-    dob = _validate_dob(event.get("dob"))
     result = lookup_policy_by_number(config, number)
-    matched = [p for p in result.policies if p.dob == dob]
+    matched = [p for p in result.policies]
     return {
         "found": bool(matched),
         "has_active": any(p.is_active for p in matched),
         "policies": [_policy_view(config, p) for p in matched],
+    }
+
+
+def _verify_dob(config: AppConfig, event: dict) -> dict:
+    """Check a number + date of birth (optionally + full name) belong together.
+
+    Returns identifiers only -- no policy field is echoed back, so a failed guess
+    learns nothing about the real holder (see the module docstring). ``policy_ids``
+    is empty whenever ``verified`` is False.
+    """
+    number = _validate_number(event.get("number"))
+    dob = _validate_dob(event.get("dob"))
+    full_name = _validate_full_name(event.get("full_name"))
+
+    if full_name is not None:
+        # Name supplied: the stricter ACTIVE-only, name-matched check, which
+        # already returns at most one policy.
+        result = verify_dob_name(config, number, dob, full_name)
+        return {
+            "verified": result.verified,
+            # verify_dob_name only ever matches an ACTIVE policy, so a match here
+            # is by definition active.
+            "has_active": result.verified,
+            "policy_ids": [result.policy_id] if result.policy_id else [],
+        }
+
+    matched = [p for p in lookup_policy_by_number(config, number).policies if p.dob == dob]
+    return {
+        "verified": bool(matched),
+        "has_active": any(p.is_active for p in matched),
+        "policy_ids": [p.policy_id for p in matched],
     }
 
 
@@ -212,7 +267,6 @@ def _escalate(config: AppConfig, event: dict) -> dict:
     # epoch_to_sort_key).
     record = EscalationRecord(
         escalation_id=str(uuid.uuid4()),
-        session_id=event["session_id"],
         reason=reason,
         status=EscalationStatus.QUEUED,
         queue_key=f"{_QUEUE_PRIORITY:02d}#{epoch_to_sort_key(now)}",
@@ -227,16 +281,16 @@ def _escalate(config: AppConfig, event: dict) -> dict:
     )
     EscalationRepository(config).save(record)
     logger.warning(
-        "escalation queued (mcp tool): id=%s reason=%s session=%s",
+        "escalation queued (mcp tool): id=%s reason=%s",
         record.escalation_id,
         reason,
-        record.session_id,
     )
     return {"escalation_id": record.escalation_id, "status": "queued"}
 
 
 _DISPATCH = {
     "get_policy": _get_policy,
+    "verify_dob": _verify_dob,
     "register_claim": _register_claim,
     "escalate": _escalate,
 }
