@@ -260,7 +260,6 @@ class EscalationRecord:
     """
 
     escalation_id: str
-    session_id: str
     reason: str  # a HandoffReason value
     status: EscalationStatus
     queue_key: str  # status-index range key: f"{priority:02d}#{epoch_to_sort_key(now)}" (not created_at -- that's AU-formatted and not sortable)
@@ -281,7 +280,6 @@ class EscalationRecord:
         """Serialise to a DynamoDB item (omitting ``None`` optional fields)."""
         item: dict[str, Any] = {
             "escalationId": self.escalation_id,
-            "sessionId": self.session_id,
             "reason": self.reason,
             "status": self.status.value,
             "queueKey": self.queue_key,
@@ -312,7 +310,6 @@ class EscalationRecord:
         """Build an :class:`EscalationRecord` from a DynamoDB item."""
         return cls(
             escalation_id=item["escalationId"],
-            session_id=item["sessionId"],
             reason=item["reason"],
             status=EscalationStatus(item["status"]),
             queue_key=item["queueKey"],
