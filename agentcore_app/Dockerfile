@@ -24,7 +24,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY strands_agent.py .
+# strands_agent.py serves /ws (voice) and /ping; text_invocations.py adds
+# POST /invocations, the text turn that Slack and any other chat front end
+# invoke. slack_adapter.py is deliberately NOT copied — it runs outside the
+# runtime and calls into it.
+COPY strands_agent.py text_invocations.py ./
 
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app

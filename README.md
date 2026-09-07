@@ -215,41 +215,55 @@ Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**
 ## Slack
 
 ```
-Slack ── Socket Mode ──> agentcore_app/slack_adapter.py ──> imports strands_agent.py
-                                                              (persona, tools, guardrails, memory)
-                                                                        │
-                                                                └── AgentCore Gateway
+Slack ── Socket Mode ──> agentcore_app/slack_adapter.py
+                              (no agent in here at all)
+                                       │
+                          bedrock-agentcore:InvokeAgentRuntime
+                                       │
+                         the SAME AgentCore Runtime that serves /ws
+                          strands_agent.py + text_invocations.py
+                                       │
+                               AgentCore Gateway
 ```
 
-[`slack_adapter.py`](agentcore_app/slack_adapter.py) is an adapter, not a
-second agent. `build_gateway_tools()`, `get_system_prompt()` and
-`build_memory_session_manager()` are imported straight out of
-`strands_agent.py` and used unmodified — every guardrail (grounding,
-fabrication, idempotency, the high-value-claim gate, output sanitizing) is the
-same code that runs on a call, and a prompt you edit in the Bedrock console
-goes live on both at once. **`strands_agent.py` is not modified, and `/ws` is
-untouched.**
+Ava is deployed **once**. Slack doesn't run its own copy of her — the adapter
+is a thin client that invokes the runtime, so her persona, her tools, her
+guardrails and her memory are shared with the voice call. Edit the prompt in
+the Bedrock console or change what the gateway exposes and both channels
+change together, with nothing to redeploy on the Slack side.
 
-Two things have to differ, and only two:
+| File | Runs where | What it is |
+|---|---|---|
+| `strands_agent.py` | runtime | `/ws` (voice) + `/ping`. **Unchanged** apart from four lines mounting the router below. |
+| `text_invocations.py` | runtime | `POST /invocations` — one typed turn, reusing `build_gateway_tools()`, `get_system_prompt()` and `build_memory_session_manager()` from `strands_agent.py` verbatim. |
+| `slack_adapter.py` | anywhere | Slack ↔ `InvokeAgentRuntime`. No Strands, no gateway, no model, no history. |
 
-- **The model.** Nova Sonic is speech-to-speech, so a Slack turn is answered
-  by Claude on Bedrock (`TEXT_MODEL_ID`, default
-  `global.anthropic.claude-opus-5`) driving the same tools.
+`serverProtocol: HTTP` already exposes both `/invocations` and `/ws` on one
+runtime (see [`DEPLOY.md`](agentcore_app/DEPLOY.md) step 3), so this needs no
+second runtime and no second image — just a rebuild and update.
+
+Two things differ between a typed turn and a call, and only two:
+
+- **The model.** Nova Sonic is speech-to-speech, so `/invocations` answers with
+  `TEXT_MODEL_ID` (default `global.anthropic.claude-opus-5`) driving the same
+  tools. It must be an *inference profile* id — `us.` or `global.` prefixed. A
+  bare id like `amazon.nova-lite-v1:0` fails with a `ValidationException`.
 - **The last paragraph of the prompt.** `SYSTEM_INSTRUCTION` was written for a
   call, so `_TEXT_CHANNEL_OVERLAY` overrides the rules that are about *speech*
   — read every digit back and get a yes, one or two sentences then stop — and
   leaves every business rule alone.
 
-**A thread is a call.** Everything under one root message shares Ava's history
-and her guardrail state; a new thread starts fresh, and so does a thread quiet
-for `SLACK_IDLE_TIMEOUT_SECONDS` (default 30 min). Once she's replying in a
-thread you can keep talking without mentioning her again; say `reset` to clear
-it. Her memory actor is the **Slack member id**, so someone who messaged last
-week is recognised this week — their mobile number is never inferred from
+**A Slack thread is a runtime session.** The channel and root timestamp hash
+into a stable `runtimeSessionId`, and AgentCore routes that id back to the same
+instance, so Ava's history and guardrail state for the thread survive between
+messages. A new thread is a new session; say `reset` to clear one. Her memory
+actor is the **Slack member id** — a mobile number is never inferred from
 Slack, she asks for it and looks it up exactly as she would on a call.
 
-**1. Create the Slack app.** At [api.slack.com/apps](https://api.slack.com/apps)
-choose *Create New App → From an app manifest*, pick your workspace, and paste:
+### 1. Create the Slack app
+
+At [api.slack.com/apps](https://api.slack.com/apps) choose *Create New App →
+From an app manifest*, pick your workspace, and paste:
 
 ```yaml
 display_information:
@@ -263,7 +277,7 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read   # see mentions in channels
-      - chat:write          # post replies
+      - chat:write          # post replies  <-- easy to miss; without it every turn fails
       - im:history          # read DMs
       - im:read
       - channels:history    # follow-ups in a thread she's already in
@@ -281,13 +295,20 @@ settings:
   socket_mode_enabled: true
 ```
 
-**2. Get the two tokens.** Under *Basic Information → App-Level Tokens*,
-generate one with the `connections:write` scope — that's `SLACK_APP_TOKEN`
-(`xapp-...`). Then *Install App* to the workspace and copy the Bot User OAuth
-Token from *OAuth & Permissions* — that's `SLACK_BOT_TOKEN` (`xoxb-...`). Put
-both in `.env`.
+Under *Basic Information → App-Level Tokens*, generate one with
+`connections:write` — that's `SLACK_APP_TOKEN` (`xapp-...`). Then *Install App*
+and copy the Bot User OAuth Token from *OAuth & Permissions* — that's
+`SLACK_BOT_TOKEN` (`xoxb-...`).
 
-**3. Run it**, alongside (or instead of) the voice server:
+### 2. Redeploy the runtime with the text endpoint
+
+`text_invocations.py` has to be in the image, and the execution role needs
+`bedrock:InvokeModel` / `InvokeModelWithResponseStream` for `TEXT_MODEL_ID` as
+well as for Nova Sonic. Rebuild and push per
+[`DEPLOY.md`](agentcore_app/DEPLOY.md) step 1, add `TEXT_MODEL_ID` to
+`env-vars.json`, then `UpdateAgentRuntime` with the new image.
+
+### 3. Run the adapter
 
 ```bash
 cd agentcore_app
@@ -296,7 +317,54 @@ pip install -r requirements.txt
 python slack_adapter.py
 ```
 
-Socket Mode dials out to Slack, so there's no public URL, no API Gateway and
-no request-signature verification — the same command works from a laptop and
-from the deployed container. Invite her to a channel (`/invite @Ava`) or open
-a DM, and say hello.
+`.env` needs `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` and `AGENT_RUNTIME_ARN`, and
+the principal running it needs `bedrock-agentcore:InvokeAgentRuntime` on that
+ARN. Socket Mode dials out to Slack, so there's no public URL and no
+request-signature verification — run it from a laptop or a small always-on
+task; it's tiny precisely because the agent isn't in it. Then `/invoke @Ava`
+into a channel, or open a DM.
+
+### Testing Slack against a local server
+
+You can drive real Slack messages through code you're still editing — no build,
+no push, no `UpdateAgentRuntime`. Set `AGENT_RUNTIME_ENDPOINT` and the adapter
+POSTs each turn to your own machine instead of invoking AWS (the same idea as
+`frontend/index.html` accepting a direct `ws://` URL instead of the presign
+Lambda).
+
+**Terminal 1 — the agent:**
+```bash
+cd agentcore_app && source .venv/bin/activate
+python strands_agent.py            # serves /ping, /ws and /invocations on :8080
+```
+
+**Terminal 2 — the Slack adapter:**
+```bash
+cd agentcore_app && source .venv/bin/activate
+AGENT_RUNTIME_ENDPOINT=http://127.0.0.1:8080 python slack_adapter.py
+```
+
+It prints which one it's talking to on startup, so there's no guessing:
+
+```
+[slack] sending turns to: LOCAL http://127.0.0.1:8080/invocations
+```
+
+Now DM Ava or mention her in a channel. Turns appear in terminal 1 (`[text]
+opened session ...`, `[tool call] ...`) and replies come back in Slack. Only
+`TEXT_MODEL_ID`, `MCP_SERVER_URL` and AWS credentials need to be right — the
+runtime doesn't have to be deployed at all. Comment out
+`AGENT_RUNTIME_ENDPOINT` to switch back to the deployed runtime.
+
+To exercise `/invocations` without Slack at all:
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H 'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: local-dev-session-000000000000000' \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "hi"}'
+```
+
+The session-id header is what AgentCore normally injects; any string of 33+
+characters works locally. Reuse the same one across calls to continue a
+conversation, or send `{"reset": true}` to clear it.

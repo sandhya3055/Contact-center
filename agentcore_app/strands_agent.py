@@ -126,7 +126,7 @@ _INJECTION_PATTERNS = [
         r"disregard (all|any|the)?\s*(previous|prior|above)",
         r"new (system )?instructions",
         r"you are now (a|an)",
-        r"system\s*:\s*\S",
+        r"(?:^|\n)[^\S\n]*system[^\S\n]*:[^\S\n]*\S",
         r"reveal (the|your) (system prompt|instructions)",
     )
 ]
@@ -980,12 +980,22 @@ class _TranscriptConsistencyGateTool(AgentTool):
         recent_digits: _RecentUserDigits,
         grounded_values: dict[str, set[str]],
         tried_numbers: set[str],
+        check_truncation: bool = True,
     ) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._recent_digits = recent_digits
         self._grounded_values = grounded_values
         self._tried_numbers = tried_numbers
+        # Check #1 below only makes sense where speech-to-text is involved.
+        # On a typed channel the value arrives exactly as written, so a
+        # "truncated prefix" is impossible -- and the check false-positives
+        # there by construction: spoken_digits() concatenates the last few
+        # turns, so someone confirming their number ("+6141234567" ... "yes,
+        # +6141234567") produces a buffer that is longer than the argument
+        # and starts with it, which is precisely the shape this reads as a
+        # dropped digit. Defaults to True so the voice call is unchanged.
+        self._check_truncation = check_truncation
 
     @property
     def tool_name(self) -> str:
@@ -1005,7 +1015,8 @@ class _TranscriptConsistencyGateTool(AgentTool):
         truncated_fields = [
             key
             for key, value in arguments.items()
-            if isinstance(value, str)
+            if self._check_truncation
+            and isinstance(value, str)
             and _PHONE_LIKE_PATTERN.match(value)
             and len(spoken) > len(value) - 1
             and spoken.startswith(value[1:])
@@ -1127,6 +1138,7 @@ async def build_gateway_tools(
     recent_digits: _RecentUserDigits,
     on_mobile_number_confirmed: Callable[[str], Awaitable[None]],
     known_mobile_number: list[str | None],
+    check_truncation: bool = True,
 ) -> list[AgentTool]:
     """Load every tool the gateway currently exposes, unmodified.
 
@@ -1164,7 +1176,9 @@ async def build_gateway_tools(
         tool = _GroundingGateTool(tool, grounded_values)
         tool = _IdempotencyGateTool(tool)
         tool = _HighValueClaimGateTool(tool)
-        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers)
+        tool = _TranscriptConsistencyGateTool(
+            tool, recent_digits, grounded_values, tried_numbers, check_truncation
+        )
         tool = _MobileNumberSyncTool(tool, on_mobile_number_confirmed, known_mobile_number)
         wrapped.append(_LoggingTool(tool))
 
@@ -1299,6 +1313,18 @@ app = FastAPI()
 async def ping():
     """Health check endpoint required by AgentCore Runtime."""
     return {"status": "Healthy", "time_of_last_update": int(datetime.now().timestamp())}
+
+
+# The other half of AgentCore Runtime's HTTP contract. `/ws` above is the voice
+# call; `POST /invocations` is a typed turn, so a text front end (Slack, and
+# whatever comes after) can use this same deployed runtime instead of running
+# its own copy of Ava. It reuses build_gateway_tools, get_system_prompt and
+# build_memory_session_manager from this file unchanged -- see
+# text_invocations.py. Imported after `app` exists so the module can be read
+# top-to-bottom; nothing above this line depends on it.
+from text_invocations import router as _text_router  # noqa: E402
+
+app.include_router(_text_router)
 
 
 @app.websocket("/ws")
