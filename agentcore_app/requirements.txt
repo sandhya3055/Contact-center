@@ -7,6 +7,8 @@ bedrock-agentcore[strands-agents]  # AgentCoreMemorySessionManager — session (
                             # caller memory. Only imported when MEMORY_ID is set; the call runs
                             # without it otherwise (see build_memory_session_manager).
 python-dotenv               # loads ../.env for local dev only (no-op in the deployed container)
+slack-bolt                  # slack_adapter.py only. Socket Mode ships with it, so no public URL
+                            # and no separate slack-sdk pin. strands_agent.py never imports it.
 pyaudio==0.2.14             # Audio I/O (required by BidiAgent even though this container has no mic/speakers).
                             # Pinned: 0.2.14 is the version already verified to build cleanly (used by
                             # bot.py's own venv); an unpinned resolve can land on the older 0.2.13, which

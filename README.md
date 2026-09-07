@@ -211,3 +211,92 @@ Runtime ARN and a Lambda Function URL in front of it:
 
 **Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
 Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**
+
+## Slack
+
+```
+Slack ── Socket Mode ──> agentcore_app/slack_adapter.py ──> imports strands_agent.py
+                                                              (persona, tools, guardrails, memory)
+                                                                        │
+                                                                └── AgentCore Gateway
+```
+
+[`slack_adapter.py`](agentcore_app/slack_adapter.py) is an adapter, not a
+second agent. `build_gateway_tools()`, `get_system_prompt()` and
+`build_memory_session_manager()` are imported straight out of
+`strands_agent.py` and used unmodified — every guardrail (grounding,
+fabrication, idempotency, the high-value-claim gate, output sanitizing) is the
+same code that runs on a call, and a prompt you edit in the Bedrock console
+goes live on both at once. **`strands_agent.py` is not modified, and `/ws` is
+untouched.**
+
+Two things have to differ, and only two:
+
+- **The model.** Nova Sonic is speech-to-speech, so a Slack turn is answered
+  by Claude on Bedrock (`TEXT_MODEL_ID`, default
+  `global.anthropic.claude-opus-5`) driving the same tools.
+- **The last paragraph of the prompt.** `SYSTEM_INSTRUCTION` was written for a
+  call, so `_TEXT_CHANNEL_OVERLAY` overrides the rules that are about *speech*
+  — read every digit back and get a yes, one or two sentences then stop — and
+  leaves every business rule alone.
+
+**A thread is a call.** Everything under one root message shares Ava's history
+and her guardrail state; a new thread starts fresh, and so does a thread quiet
+for `SLACK_IDLE_TIMEOUT_SECONDS` (default 30 min). Once she's replying in a
+thread you can keep talking without mentioning her again; say `reset` to clear
+it. Her memory actor is the **Slack member id**, so someone who messaged last
+week is recognised this week — their mobile number is never inferred from
+Slack, she asks for it and looks it up exactly as she would on a call.
+
+**1. Create the Slack app.** At [api.slack.com/apps](https://api.slack.com/apps)
+choose *Create New App → From an app manifest*, pick your workspace, and paste:
+
+```yaml
+display_information:
+  name: Ava
+  description: Policy details, claims, and a human when you need one.
+features:
+  bot_user:
+    display_name: Ava
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read   # see mentions in channels
+      - chat:write          # post replies
+      - im:history          # read DMs
+      - im:read
+      - channels:history    # follow-ups in a thread she's already in
+      - groups:history      # same, in private channels
+      - reactions:write     # the "working on it" reaction
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: false
+  socket_mode_enabled: true
+```
+
+**2. Get the two tokens.** Under *Basic Information → App-Level Tokens*,
+generate one with the `connections:write` scope — that's `SLACK_APP_TOKEN`
+(`xapp-...`). Then *Install App* to the workspace and copy the Bot User OAuth
+Token from *OAuth & Permissions* — that's `SLACK_BOT_TOKEN` (`xoxb-...`). Put
+both in `.env`.
+
+**3. Run it**, alongside (or instead of) the voice server:
+
+```bash
+cd agentcore_app
+source .venv/bin/activate
+pip install -r requirements.txt
+python slack_adapter.py
+```
+
+Socket Mode dials out to Slack, so there's no public URL, no API Gateway and
+no request-signature verification — the same command works from a laptop and
+from the deployed container. Invite her to a channel (`/invite @Ava`) or open
+a DM, and say hello.
