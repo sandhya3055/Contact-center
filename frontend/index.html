@@ -777,8 +777,8 @@
           <span class="orb-ring two"></span>
           <span class="orb">A</span>
         </div>
-        <p class="agent-name">Ava</p>
-        <p class="agent-role">AI Voice Assistant · Assurio</p>
+        <p class="agent-name" id="agentName">Ava</p>
+        <p class="agent-role" id="agentRole">AI Voice Assistant · Assurio</p>
 
         <div class="status-row">
           <span id="status" class="status idle">Not connected</span>
@@ -866,6 +866,8 @@ const controls = document.getElementById('controls');
 const mobileInput = document.getElementById('mobileNumber');
 const mobileHint = document.getElementById('mobileHint');
 const configHint = document.getElementById('configHint');
+const agentNameEl = document.getElementById('agentName');
+const agentRoleEl = document.getElementById('agentRole');
 
 const MOBILE_HINT_DEFAULT = mobileHint.textContent;
 const MOBILE_PATTERN = /^\+?[\d\-\s]{7,20}$/;
@@ -1280,6 +1282,37 @@ muteBtn.addEventListener('click', () => {
   addSystemLine(isMuted ? 'Microphone muted' : 'Microphone unmuted');
 });
 
+// ---------------------------------------------------------------- handoff
+// The backend sends a `bidi_handoff` event when the call moves between Ava
+// and a person (see agentcore_app/handoff.py). Nothing about the audio path
+// changes here — a human's voice arrives as the same `bidi_audio_stream`
+// events Ava's does — this is purely so the caller can see who they're
+// talking to instead of wondering why the voice changed.
+function applyHandoff(state, agentName) {
+  if (state === 'escalated') {
+    setStatus('connecting', 'Finding a specialist…');
+    addSystemLine('Connecting you to a specialist — stay on the line.');
+    return;
+  }
+  if (state === 'human') {
+    const name = (agentName || 'a specialist').trim();
+    agentNameEl.textContent = name;
+    agentRoleEl.textContent = 'Customer care specialist · Assurio';
+    setStatus('connected', 'On call');
+    addSystemLine(`${name} has joined the call.`);
+    // Live speech between two people isn't transcribed, so say so rather
+    // than leaving the panel looking broken.
+    addSystemLine('Transcript pauses while you speak with a person.');
+    return;
+  }
+  if (state === 'ai') {
+    agentNameEl.textContent = 'Ava';
+    agentRoleEl.textContent = 'AI Voice Assistant · Assurio';
+    setStatus('connected', 'On call');
+    addSystemLine('You’re back with Ava.');
+  }
+}
+
 // ---------------------------------------------------------------- lifecycle
 
 async function start() {
@@ -1366,6 +1399,9 @@ async function start() {
       if (data.type === 'bidi_interruption') {
         stopPlayback();
       }
+      if (data.type === 'bidi_handoff') {
+        applyHandoff(data.state, data.agent_name);
+      }
       if (data.type === 'bidi_call_metadata_update' && data.mobile_number) {
         // Ava confirmed a different number than what the UI pre-filled —
         // e.g. the caller corrected a wrong one mid-call (see the "Phone
@@ -1389,6 +1425,9 @@ async function start() {
       stopMic();
       setMuted(false);
       setCallUiState(false);
+      // Back to Ava for the next call, however this one ended.
+      agentNameEl.textContent = 'Ava';
+      agentRoleEl.textContent = 'AI Voice Assistant · Assurio';
       connectBtn.disabled = false;
       activeStreamBubbles.user = activeStreamBubbles.assistant = null;
     };

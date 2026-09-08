@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Portal — Assurio</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6fb;
+    --surface: #ffffff;
+    --surface-alt: #f2f4fa;
+    --border: #e2e5ee;
+    --border-strong: #cfd5e4;
+    --text: #0f1219;
+    --text-muted: #586073;
+    --text-faint: #8a92a6;
+    --brand: #1b3bd6;
+    --brand-solid: #1b3bd6;
+    --brand-soft: #1b3bd614;
+    --ring: #1b3bd633;
+    --accent: #0d9488;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --success: #16a34a;
+    --success-hover: #128a3e;
+    --warning: #b45309;
+    --warning-soft: #f59e0b26;
+    --ink: #0c1024;
+    --ink-text: #f5f7fd;
+    --ink-muted: #98a2c4;
+    --shadow: 0 1px 2px rgba(14,18,33,0.05), 0 1px 10px rgba(14,18,33,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #090b11;
+      --surface: #13161e;
+      --surface-alt: #1a1e28;
+      --border: #252935;
+      --border-strong: #333846;
+      --text: #eceef5;
+      --text-muted: #a0a7ba;
+      --text-faint: #737b90;
+      --brand: #5b7dff;
+      --brand-solid: #3352d9;
+      --brand-soft: #5b7dff1f;
+      --ring: #5b7dff4d;
+      --accent: #2dd4bf;
+      --ink: #070911;
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 1px 10px rgba(0,0,0,0.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { margin: 0; line-height: 1.2; letter-spacing: -0.01em; }
+  p { margin: 0; }
+
+  /* ---------------- top bar ---------------- */
+  .topbar {
+    background: var(--ink); color: var(--ink-text);
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 20px; position: sticky; top: 0; z-index: 20;
+  }
+  .mark {
+    width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+    background: linear-gradient(135deg, #3b6bff, #7c3aed);
+    display: grid; place-items: center; font-weight: 800; font-size: 14px;
+  }
+  .topbar .titles strong { display: block; font-size: 14px; font-weight: 650; }
+  .topbar .titles span { font-size: 12px; color: var(--ink-muted); }
+  .topbar .spacer { margin-left: auto; }
+  .callid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: var(--ink-muted);
+    border: 1px solid #ffffff1f; border-radius: 7px; padding: 4px 9px;
+  }
+
+  /* ---------------- layout ---------------- */
+  main {
+    max-width: 1180px; margin: 0 auto; padding: 22px 20px 40px;
+    display: grid; grid-template-columns: 400px 1fr; gap: 18px; align-items: start;
+  }
+  @media (max-width: 940px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow);
+  }
+  .card + .card { margin-top: 18px; }
+  .card-head {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .card-head h2 {
+    font-size: 12px; font-weight: 700; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .card-body { padding: 18px; }
+
+  /* ---------------- status ---------------- */
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 650; padding: 5px 11px 5px 9px; border-radius: 999px;
+  }
+  .status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .status.ai { background: var(--brand-soft); color: var(--brand); }
+  .status.escalated { background: var(--warning-soft); color: var(--warning); }
+  .status.escalated::before { animation: pulse 1.2s ease-in-out infinite; }
+  .status.human { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+  .status.human::before { animation: pulse 1.6s ease-in-out infinite; }
+  .status.ended { background: color-mix(in srgb, var(--text-faint) 16%, transparent); color: var(--text-faint); }
+  .status.error { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .timer { font-variant-numeric: tabular-nums; font-size: 12.5px; font-weight: 650; color: var(--ink-muted); }
+
+  /* ---------------- escalation detail ---------------- */
+  .reason {
+    font-size: 19px; font-weight: 700; letter-spacing: -0.01em;
+  }
+  .reason-sub { margin-top: 4px; font-size: 13px; color: var(--text-faint); }
+  .summary {
+    margin-top: 16px; padding: 14px 16px; border-radius: 11px;
+    background: var(--surface-alt); border: 1px solid var(--border);
+    font-size: 14px;
+  }
+  .summary .label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--text-faint); margin-bottom: 6px;
+  }
+  dl.facts { margin: 18px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 9px 16px; font-size: 13.5px; }
+  dl.facts dt { color: var(--text-faint); }
+  dl.facts dd { margin: 0; font-weight: 550; word-break: break-word; }
+  dl.facts dd.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+  /* ---------------- join controls ---------------- */
+  .join-note { font-size: 13px; color: var(--text-muted); }
+  label { display: block; font-size: 12px; font-weight: 650; color: var(--text-muted); margin-bottom: 6px; }
+  input[type="text"] {
+    width: 100%; padding: 10px 12px; font: inherit; font-size: 14px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: var(--surface-alt); color: inherit;
+  }
+  input:focus { outline: none; border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--ring); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font: inherit; font-size: 14.5px; font-weight: 650;
+    padding: 12px 20px; border-radius: 11px; border: 1px solid transparent;
+    cursor: pointer; width: 100%;
+    transition: background 0.15s, transform 0.05s, opacity 0.15s;
+  }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+  .btn--join { background: var(--success); color: #fff; margin-top: 14px; }
+  .btn--join:hover:not(:disabled) { background: var(--success-hover); }
+  .btn--leave { background: var(--danger); color: #fff; }
+  .btn--leave:hover:not(:disabled) { background: var(--danger-hover); }
+  .btn--ghost { background: var(--surface-alt); color: var(--text); border-color: var(--border-strong); }
+  .btn svg { width: 18px; height: 18px; }
+  /* Mute glyph follows aria-pressed, not a JS-toggled `hidden`: `hidden` is an
+     HTML attribute and has no effect on an <svg> element. */
+  #muteBtn[aria-pressed="false"] #micOff,
+  #muteBtn[aria-pressed="true"] #micOn { display: none; }
+
+  .live-row { display: flex; gap: 10px; margin-top: 14px; }
+  .live-row .btn { width: auto; flex: 1; }
+  .on-air {
+    display: flex; align-items: center; gap: 9px;
+    padding: 11px 14px; border-radius: 11px; margin-bottom: 14px;
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+    font-size: 13.5px; font-weight: 600; color: var(--success);
+  }
+  .on-air .rec { width: 9px; height: 9px; border-radius: 50%; background: var(--success); animation: pulse 1.4s ease-in-out infinite; }
+
+  /* level meters */
+  .meters { margin-top: 16px; display: grid; gap: 12px; }
+  .meter-row { display: flex; align-items: center; gap: 10px; }
+  .meter-row .who { font-size: 12px; font-weight: 650; color: var(--text-muted); width: 62px; flex-shrink: 0; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 20px; flex: 1; }
+  .bars span {
+    flex: 1; border-radius: 2px; background: var(--border-strong);
+    height: calc(3px + var(--h, 0) * 17px); transition: height 0.08s linear, background 0.2s;
+  }
+  .bars[data-active="true"] span { background: var(--accent); }
+  .bars[data-muted="true"] span { background: var(--border-strong) !important; }
+
+  .audio-nudge {
+    margin: 0 18px 18px; padding: 11px 14px; border-radius: 10px;
+    background: var(--warning-soft); color: var(--warning);
+    font-size: 13px; font-weight: 600; cursor: pointer; border: none; width: calc(100% - 36px);
+    text-align: left; font-family: inherit;
+  }
+
+  /* ---------------- transcript ---------------- */
+  .transcript-card { display: flex; flex-direction: column; height: min(58vh, 540px); min-height: 380px; }
+  #transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; }
+  #transcript:empty::after {
+    content: 'Nothing transcribed on this call yet.';
+    margin: auto; color: var(--text-faint); font-size: 13.5px;
+  }
+  .msg { display: flex; gap: 9px; margin-bottom: 14px; max-width: 100%; align-items: flex-end; }
+  .msg.user { flex-direction: row-reverse; margin-left: auto; }
+  .msg.assistant { margin-right: auto; }
+  .msg .avatar {
+    width: 25px; height: 25px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center; font-size: 10px; font-weight: 700;
+  }
+  .msg.assistant .avatar { background: linear-gradient(135deg, var(--brand), #7c3aed); color: #fff; }
+  .msg.user .avatar { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text-muted); }
+  .msg .bubble { max-width: 78%; padding: 9px 13px; border-radius: 15px; font-size: 14px; }
+  .msg.assistant .bubble { background: var(--surface-alt); border-bottom-left-radius: 4px; }
+  .msg.user .bubble { background: var(--brand-solid); color: #fff; border-bottom-right-radius: 4px; }
+  .msg .stamp { font-size: 10.5px; color: var(--text-faint); align-self: flex-end; flex-shrink: 0; }
+  .msg.system { justify-content: center; margin: 4px 0 14px; }
+  .msg.system .bubble {
+    background: var(--surface-alt); color: var(--text-faint);
+    font-size: 11.5px; font-weight: 600; padding: 4px 12px; border-radius: 999px; max-width: 100%;
+  }
+  .transcript-foot {
+    flex-shrink: 0; border-top: 1px solid var(--border); padding: 11px 18px;
+    font-size: 12px; color: var(--text-faint); background: var(--surface-alt);
+    border-radius: 0 0 14px 14px;
+  }
+
+  /* provenance tags + refresh, so it's clear which store the panel is showing */
+  .src-tag {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent);
+    padding: 3px 8px; border-radius: 6px;
+  }
+  .src-tag[data-stale="true"] { color: var(--warning); background: var(--warning-soft); }
+  .mini-btn {
+    margin-left: 8px; font: inherit; font-size: 11.5px; font-weight: 650;
+    padding: 4px 10px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-muted);
+  }
+  .mini-btn:hover { color: var(--text); }
+  .mini-btn:disabled { opacity: 0.5; cursor: progress; }
+  .note { margin-top: 12px; font-size: 12.5px; color: var(--text-faint); }
+  .msg.memory .bubble { border: 1px dashed transparent; }
+  .msg .badge {
+    font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-faint); align-self: flex-end;
+  }
+
+  .empty-state { padding: 60px 24px; text-align: center; }
+  .empty-state h2 { font-size: 18px; font-weight: 700; }
+  .empty-state p { margin-top: 8px; font-size: 14px; color: var(--text-muted); }
+  @media (prefers-reduced-motion: reduce) { * { animation-duration: 0.001s !important; } }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="mark">A</div>
+  <div class="titles">
+    <strong>Assurio — Agent Portal</strong>
+    <span>Human handoff console</span>
+  </div>
+  <div class="spacer"></div>
+  <span id="topStatus" class="status ai">Connecting…</span>
+  <span id="topTimer" class="timer" hidden>00:00</span>
+  <span id="topCallId" class="callid"></span>
+</div>
+
+<!-- shown when the link is missing/expired/unauthorized -->
+<div id="deadLink" class="empty-state" hidden>
+  <h2 id="deadTitle">This handoff link isn’t valid</h2>
+  <p id="deadBody">
+    It may have expired, the call may have ended a while ago, or the link was
+    truncated. Ask for a fresh escalation link in Slack.
+  </p>
+</div>
+
+<main id="console" hidden>
+  <div>
+    <!-- escalation -->
+    <section class="card">
+      <div class="card-head"><h2>Why this call escalated</h2></div>
+      <div class="card-body">
+        <p class="reason" id="reasonText">—</p>
+        <p class="reason-sub" id="reasonWhen"></p>
+
+        <div class="summary" id="summaryBox" hidden>
+          <div class="label">Ava’s summary for you</div>
+          <div id="summaryText"></div>
+        </div>
+
+        <dl class="facts" id="facts"></dl>
+      </div>
+    </section>
+
+    <!-- join / live controls -->
+    <section class="card">
+      <div class="card-head"><h2>The call</h2></div>
+      <button class="audio-nudge" id="audioNudge" hidden>
+        🔈 Click to turn on call audio in this tab
+      </button>
+      <div class="card-body">
+        <div class="on-air" id="onAir" hidden>
+          <span class="rec"></span>
+          <span>You’re on the call — Ava is off the line</span>
+        </div>
+
+        <p class="join-note" id="joinNote">
+          You can hear the call now. Joining puts you through to the caller and
+          takes Ava off the line.
+        </p>
+
+        <div id="joinBlock">
+          <div style="margin-top:14px">
+            <label for="agentName">Your name (the caller is told who joined)</label>
+            <input id="agentName" type="text" placeholder="e.g. Rahul from claims">
+          </div>
+          <button class="btn btn--join" id="joinBtn">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+          Join the call
+          </button>
+        </div>
+
+        <div class="live-row" id="liveControls" hidden>
+          <button class="btn btn--ghost" id="muteBtn" aria-pressed="false">
+            <svg id="micOn" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/></svg>
+            <svg id="micOff" viewBox="0 0 24 24" fill="currentColor"><path d="M15 10.6V5a3 3 0 0 0-5.9-.75l5.9 6.35zM4.3 3 3 4.3l6 6V11a3 3 0 0 0 4.5 2.6l1.2 1.3A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.9V21h2v-3.1a6.9 6.9 0 0 0 2.9-1.1l3.8 3.9 1.3-1.3z"/></svg>
+            <span id="muteLabel">Mute</span>
+          </button>
+          <button class="btn btn--leave" id="leaveBtn">Leave call</button>
+        </div>
+
+        <div class="meters">
+          <div class="meter-row">
+            <span class="who">Caller</span>
+            <div class="bars" id="callerBars" data-active="true">
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+          <div class="meter-row">
+            <span class="who">You</span>
+            <div class="bars" id="selfBars" data-active="false">
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <!-- conversation -->
+    <section class="card transcript-card">
+      <div class="card-head">
+        <h2>Conversation</h2>
+        <span class="src-tag" id="sourceTag">loading…</span>
+        <span style="margin-left:auto;font-size:12px;color:var(--text-faint)" id="watchers"></span>
+        <button class="mini-btn" id="refreshBtn" title="Re-read AgentCore Memory and the escalations table">Refresh</button>
+      </div>
+      <div id="transcript"></div>
+      <div class="transcript-foot" id="transcriptFoot">
+        Everything the caller and Ava said on this call.
+      </div>
+    </section>
+
+    <!-- the queue row the escalate tool wrote -->
+    <section class="card" id="recordCard">
+      <div class="card-head">
+        <h2>Escalation record</h2>
+        <span class="src-tag" id="recordTag">DynamoDB</span>
+      </div>
+      <div class="card-body">
+        <dl class="facts" id="recordFacts"></dl>
+        <p class="note" id="recordNote" hidden></p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+// ------------------------------------------------------------------ params
+// The call and its token come from the Slack link, never from anything typed
+// here — so a portal session is scoped to exactly the call it was sent for.
+const params = new URLSearchParams(location.search);
+const CALL_ID = params.get('call') || '';
+const TOKEN = params.get('token') || '';
+
+const el = (id) => document.getElementById(id);
+const topStatus = el('topStatus'), topTimer = el('topTimer'), topCallId = el('topCallId');
+const deadLink = el('deadLink'), deadTitle = el('deadTitle'), deadBody = el('deadBody');
+const consoleEl = el('console');
+const reasonText = el('reasonText'), reasonWhen = el('reasonWhen');
+const summaryBox = el('summaryBox'), summaryText = el('summaryText'), facts = el('facts');
+const joinBlock = el('joinBlock'), joinBtn = el('joinBtn'), joinNote = el('joinNote');
+const liveControls = el('liveControls'), muteBtn = el('muteBtn'), muteLabel = el('muteLabel');
+const leaveBtn = el('leaveBtn');
+const onAir = el('onAir'), audioNudge = el('audioNudge');
+const transcriptEl = el('transcript'), transcriptFoot = el('transcriptFoot'), watchers = el('watchers');
+const sourceTag = el('sourceTag'), refreshBtn = el('refreshBtn');
+const recordFacts = el('recordFacts'), recordTag = el('recordTag'), recordNote = el('recordNote');
+const agentName = el('agentName');
+const callerBars = [...el('callerBars').querySelectorAll('span')];
+const selfBars = [...el('selfBars').querySelectorAll('span')];
+
+agentName.value = localStorage.getItem('ava_agent_name') || '';
+topCallId.textContent = CALL_ID ? `call ${CALL_ID}` : '';
+
+const STATE_LABELS = {
+  ai: 'Ava is handling the call',
+  escalated: 'Waiting for an agent',
+  human: 'You’re on the call',
+  ended: 'Call ended',
+};
+
+let ws = null;
+let joined = false;
+let muted = false;
+let callState = null;
+let startedAt = null;
+let timerInterval = null;
+
+function showDead(title, body) {
+  deadTitle.textContent = title;
+  deadBody.textContent = body;
+  deadLink.hidden = false;
+  consoleEl.hidden = true;
+  topStatus.className = 'status error';
+  topStatus.textContent = 'Unavailable';
+}
+
+// ------------------------------------------------------------------ audio
+// Both ends of this call speak the same wire format as the customer page:
+// base64 PCM16 at 16kHz, one JSON message per chunk.
+let audioCtx = null;
+let micStream = null, micNode = null, workletNode = null, micAnalyser = null;
+let micBuffer = [];
+const MIC_CHUNK_SAMPLES = 1600; // ~100ms
+
+// One playback queue per source: the caller and Ava are separate streams, and
+// a shared queue would push one behind the other's backlog instead of playing
+// each as it arrives.
+const queues = {};
+const monitorAnalyser = { node: null };
+
+function ensureAudio() {
+  if (audioCtx) return audioCtx;
+  audioCtx = new AudioContext({ sampleRate: 16000 });
+  const bus = audioCtx.createGain();
+  bus.connect(audioCtx.destination);
+  monitorAnalyser.node = audioCtx.createAnalyser();
+  monitorAnalyser.node.fftSize = 512;
+  bus.connect(monitorAnalyser.node);
+  queues.bus = bus;
+  startLevelLoop();
+  return audioCtx;
+}
+
+function base64ToFloat32(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 0x8000;
+  return float32;
+}
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function int16ToBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function playChunk(source, base64, sampleRate) {
+  const ctx = ensureAudio();
+  if (ctx.state === 'suspended') {
+    audioNudge.hidden = false;
+    return;
+  }
+  const float32 = base64ToFloat32(base64);
+  const buffer = ctx.createBuffer(1, float32.length, sampleRate || 16000);
+  buffer.copyToChannel(float32, 0);
+  const node = ctx.createBufferSource();
+  node.buffer = buffer;
+  node.connect(queues.bus);
+
+  const q = (queues[source] = queues[source] || { next: 0 });
+  const startAt = Math.max(ctx.currentTime, q.next);
+  node.start(startAt);
+  q.next = startAt + buffer.duration;
+}
+
+// mic capture, only while joined
+const WORKLET_SOURCE = `
+  class MicCaptureProcessor extends AudioWorkletProcessor {
+    process(inputs) {
+      const input = inputs[0];
+      if (input && input[0]) this.port.postMessage(input[0].slice());
+      return true;
+    }
+  }
+  registerProcessor('mic-capture-processor', MicCaptureProcessor);
+`;
+
+async function startMic() {
+  const ctx = ensureAudio();
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
+  });
+  const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  micNode = ctx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(ctx, 'mic-capture-processor');
+  micAnalyser = ctx.createAnalyser();
+  micAnalyser.fftSize = 512;
+  micNode.connect(micAnalyser);
+
+  workletNode.port.onmessage = (event) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !joined) return;
+    if (muted) { micBuffer = []; return; }
+    micBuffer.push(event.data);
+    const total = micBuffer.reduce((n, c) => n + c.length, 0);
+    if (total < MIC_CHUNK_SAMPLES) return;
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const c of micBuffer) { merged.set(c, offset); offset += c.length; }
+    micBuffer = [];
+    ws.send(JSON.stringify({
+      type: 'bidi_audio_input',
+      audio: int16ToBase64(floatTo16BitPCM(merged)),
+      format: 'pcm', sample_rate: 16000, channels: 1,
+    }));
+  };
+  micNode.connect(workletNode);
+  // Deliberately NOT connected to the destination — that would play the
+  // agent's own voice back into their headphones.
+}
+
+function stopMic() {
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  if (workletNode) workletNode.disconnect();
+  if (micNode) micNode.disconnect();
+  if (micAnalyser) micAnalyser.disconnect();
+  micStream = micNode = workletNode = micAnalyser = null;
+  micBuffer = [];
+}
+
+function rms(analyser, scratch) {
+  analyser.getByteTimeDomainData(scratch);
+  let sum = 0;
+  for (let i = 0; i < scratch.length; i++) {
+    const v = (scratch[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / scratch.length);
+}
+
+function startLevelLoop() {
+  const monitorScratch = new Uint8Array(monitorAnalyser.node.fftSize);
+  let micScratch = null;
+  const smoothCaller = callerBars.map(() => 0);
+  const smoothSelf = selfBars.map(() => 0);
+
+  const paint = (bars, smoothed, level) => {
+    bars.forEach((bar, i) => {
+      const weight = 0.45 + 0.55 * Math.sin((Math.PI * (i + 0.5)) / bars.length);
+      smoothed[i] += (level * weight - smoothed[i]) * 0.35;
+      bar.style.setProperty('--h', smoothed[i].toFixed(3));
+    });
+  };
+
+  const tick = () => {
+    paint(callerBars, smoothCaller, Math.min(1, rms(monitorAnalyser.node, monitorScratch) * 6));
+    if (micAnalyser) {
+      if (!micScratch || micScratch.length !== micAnalyser.fftSize) micScratch = new Uint8Array(micAnalyser.fftSize);
+      paint(selfBars, smoothSelf, muted ? 0 : Math.min(1, rms(micAnalyser, micScratch) * 7));
+    } else {
+      paint(selfBars, smoothSelf, 0);
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+audioNudge.addEventListener('click', async () => {
+  if (audioCtx) await audioCtx.resume();
+  audioNudge.hidden = true;
+});
+
+// ------------------------------------------------------------------ render
+function fmtTime(epochSeconds) {
+  return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// The conversation has two sources, and the portal shows both rather than
+// picking one: AgentCore Memory is the durable record the agent itself wrote
+// (authoritative, and survives this process), while the live stream is what's
+// being said right now — memory is written asynchronously, so the last turn
+// or two is usually only in the live stream. Memory lines come first;
+// anything live that memory hasn't caught up on is appended and marked.
+let memoryLines = [];
+let liveLines = [];
+const systemLines = [];   // portal-local notes ("you joined…"), kept on rebuild
+
+const dedupeKey = (line) => `${line.role}|${(line.text || '').trim().toLowerCase()}`;
+
+function renderConversation() {
+  const seen = new Set(memoryLines.map(dedupeKey));
+  const extra = liveLines.filter((line) => !seen.has(dedupeKey(line)));
+  const merged = [...memoryLines, ...extra.map((l) => ({ ...l, source: 'live' }))];
+
+  transcriptEl.replaceChildren();
+  for (const line of merged) appendLine(line);
+  for (const text of systemLines) appendSystem(text);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+  sourceTag.textContent = memoryLines.length
+    ? `AgentCore Memory · ${memoryLines.length} turn${memoryLines.length === 1 ? '' : 's'}`
+    : 'live stream only';
+  sourceTag.dataset.stale = String(!memoryLines.length);
+}
+
+function appendLine(line) {
+  const row = document.createElement('div');
+  row.className = `msg ${line.role === 'user' ? 'user' : 'assistant'} ${line.source || ''}`;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = line.role === 'user' ? 'C' : 'A';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = line.text;
+  const stamp = document.createElement('span');
+  stamp.className = 'stamp';
+  stamp.textContent = fmtTime(line.at);
+  row.append(avatar, bubble, stamp);
+  if (line.source === 'live') {
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = 'live';
+    row.appendChild(badge);
+  }
+  transcriptEl.appendChild(row);
+}
+
+function appendSystem(text) {
+  const row = document.createElement('div');
+  row.className = 'msg system';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  transcriptEl.appendChild(row);
+}
+
+function addTranscriptLine(line) {
+  liveLines.push(line);
+  renderConversation();
+}
+
+// ---------------------------------------------------------- escalation row
+function renderRecord(context) {
+  const record = context.record;
+  recordFacts.replaceChildren();
+  const notes = (context.notes || []).join(' ');
+  recordNote.hidden = !notes;
+  recordNote.textContent = notes;
+
+  if (!record) {
+    recordTag.textContent = 'DynamoDB · no row';
+    recordTag.dataset.stale = 'true';
+    return;
+  }
+  recordTag.textContent = 'DynamoDB';
+  recordTag.dataset.stale = 'false';
+
+  // Rendered from whatever the row actually holds, so a schema change on the
+  // table side shows up here without a change on this side.
+  const order = ['status', 'escalationId', 'callerNumber', 'holderName', 'policyId',
+                 'verified', 'createdAt', 'queueKey', 'channel', 'assignedAgentId',
+                 'claimedAt', 'ttl'];
+  const keys = [...order.filter((k) => k in record),
+                ...Object.keys(record).filter((k) => !order.includes(k))];
+  for (const key of keys) {
+    let value = record[key];
+    if (value === null || value === '' || (Array.isArray(value) && !value.length)) continue;
+    if (key === 'ttl' && typeof value === 'number') {
+      value = `${new Date(value * 1000).toLocaleString()} (expires)`;
+    } else if (typeof value === 'object') {
+      value = JSON.stringify(value);
+    }
+    const dt = document.createElement('dt');
+    dt.textContent = key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+    const dd = document.createElement('dd');
+    dd.textContent = String(value);
+    if (/id$|key$|number$|ref$/i.test(key)) dd.className = 'mono';
+    recordFacts.append(dt, dd);
+  }
+}
+
+function addSystemLine(text) {
+  systemLines.push(text);
+  appendSystem(text);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function startTimer(from) {
+  startedAt = from * 1000;
+  topTimer.hidden = false;
+  const tick = () => {
+    const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    topTimer.textContent = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
+  };
+  tick();
+  clearInterval(timerInterval);
+  timerInterval = setInterval(tick, 1000);
+}
+
+function renderCall(call, isFirst) {
+  callState = call;
+  topStatus.className = `status ${call.state}`;
+  topStatus.textContent = STATE_LABELS[call.state] || call.state;
+  watchers.textContent = call.watchers > 1 ? `${call.watchers} agents watching` : '';
+
+  const details = (call.escalation && call.escalation.details) || {};
+  const reason = details.reason || 'Escalated';
+  reasonText.textContent = String(reason).replace(/_/g, ' ');
+  if (call.escalation) {
+    reasonWhen.textContent = `Escalated at ${fmtTime(call.escalation.at)}`;
+  }
+  if (details.note) {
+    summaryBox.hidden = false;
+    summaryText.textContent = details.note;
+  }
+
+  // Every field the escalate tool was called with, plus what we know about the
+  // call — rendered generically so a new tool argument shows up on its own.
+  const rows = [
+    ['Caller number', call.mobile_number || 'not provided', true],
+    ['Call started', fmtTime(call.started_at), false],
+  ];
+  for (const [key, value] of Object.entries(details)) {
+    if (key === 'reason' || key === 'note' || value === null || value === '') continue;
+    rows.push([key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()), String(value), /id|number|ref/i.test(key)]);
+  }
+  if (call.escalation && call.escalation.escalation_id) {
+    rows.push(['Escalation id', call.escalation.escalation_id, true]);
+  }
+  facts.replaceChildren();
+  for (const [key, value, mono] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = key;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    if (mono) dd.className = 'mono';
+    facts.append(dt, dd);
+  }
+
+  if (isFirst) {
+    liveLines = (call.transcript || []).slice();
+    renderConversation();
+    startTimer(call.started_at);
+  }
+
+  const ended = call.state === 'ended';
+  const iAmOn = joined && call.state === 'human';
+  const someoneElseOn = !joined && call.state === 'human';
+
+  joinBlock.hidden = iAmOn || ended;
+  liveControls.hidden = !iAmOn;
+  onAir.hidden = !iAmOn;
+  joinBtn.disabled = ended || someoneElseOn;
+  el('callerBars').dataset.active = String(!ended);
+  el('selfBars').dataset.active = String(iAmOn);
+  el('selfBars').dataset.muted = String(muted);
+
+  if (ended) {
+    joinNote.textContent = 'The caller has hung up. This page is the record of the call.';
+    clearInterval(timerInterval);
+    topTimer.hidden = true;
+  } else if (someoneElseOn) {
+    joinNote.textContent = `${call.human_label || 'Another agent'} is on this call. You can listen in.`;
+  } else if (iAmOn) {
+    joinNote.textContent = 'The caller hears you directly. Ava will not speak while you’re on the line.';
+  }
+
+  transcriptFoot.textContent = iAmOn
+    ? 'You’re speaking with the caller — live speech isn’t transcribed here.'
+    : 'Everything the caller and Ava said on this call.';
+}
+
+// ------------------------------------------------------------------ socket
+async function connect() {
+  if (!CALL_ID || !TOKEN) {
+    showDead('This link is incomplete',
+      'It’s missing the call id or its access token. Open the escalation link from Slack directly, rather than retyping it.');
+    return;
+  }
+
+  // HTTP pre-flight before the socket, for one reason: handoff.py refuses an
+  // unauthorized portal socket *before* accepting it (so it never touches a
+  // live call), and a handshake refused that way reaches the browser as a
+  // plain 1006 close with no code — "wrong token" and "service down" look
+  // identical from here. This endpoint distinguishes them, and doubles as the
+  // first render so the page isn't blank while the socket opens.
+  try {
+    const res = await fetch(`/portal/api/call/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`);
+    if (res.status === 403) {
+      showDead('This handoff link isn’t valid',
+        'The call may have ended some time ago, or this link’s token doesn’t match. Ask for a fresh escalation link in Slack.');
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    consoleEl.hidden = false;
+    renderCall(await res.json(), true);
+  } catch (err) {
+    showDead('Can’t reach the call service', `${err.message}. The agent service may be down — try again, or ask in Slack.`);
+    return;
+  }
+
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${scheme}://${location.host}/portal/ws/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`);
+
+  // The socket's own first snapshot supersedes the pre-flight one (a line may
+  // have been spoken in between), and renderCall replaces rather than appends.
+  let firstState = true;
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'call_state') {
+      renderCall(data.call, firstState);
+      firstState = false;
+    } else if (data.type === 'transcript') {
+      addTranscriptLine(data.line);
+    } else if (data.type === 'context') {
+      memoryLines = data.memory || [];
+      renderConversation();
+      renderRecord(data);
+      refreshBtn.disabled = false;
+    } else if (data.type === 'bidi_audio_stream' && data.audio) {
+      playChunk(data.source || 'caller', data.audio, data.sample_rate);
+    } else if (data.type === 'error') {
+      addSystemLine(data.message);
+    }
+  };
+
+  ws.onclose = () => {
+    topStatus.className = 'status ended';
+    topStatus.textContent = 'Disconnected';
+    joined = false;
+    stopMic();
+    liveControls.hidden = true;
+    onAir.hidden = true;
+    addSystemLine('Portal disconnected.');
+  };
+}
+
+// ------------------------------------------------------------------ actions
+joinBtn.addEventListener('click', async () => {
+  const name = agentName.value.trim();
+  localStorage.setItem('ava_agent_name', name);
+  joinBtn.disabled = true;
+  try {
+    await startMic();               // mic first: joining without one is silence
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    joined = true;
+    muted = false;
+    ws.send(JSON.stringify({ type: 'join', agent_name: name }));
+    addSystemLine(`You joined the call${name ? ` as ${name}` : ''}.`);
+  } catch (err) {
+    joinBtn.disabled = false;
+    addSystemLine(`Couldn’t use your microphone: ${err.message}`);
+  }
+});
+
+leaveBtn.addEventListener('click', () => {
+  ws.send(JSON.stringify({ type: 'leave' }));
+  joined = false;
+  stopMic();
+  addSystemLine('You left the call — it’s back with Ava.');
+  joinBtn.disabled = false;
+});
+
+muteBtn.addEventListener('click', () => {
+  muted = !muted;
+  micBuffer = [];
+  muteBtn.setAttribute('aria-pressed', String(muted));
+  muteLabel.textContent = muted ? 'Unmute' : 'Mute';
+  el('selfBars').dataset.muted = String(muted);
+});
+
+refreshBtn.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  refreshBtn.disabled = true;
+  ws.send(JSON.stringify({ type: 'refresh_context' }));
+});
+
+window.addEventListener('beforeunload', () => {
+  if (ws && joined) ws.send(JSON.stringify({ type: 'leave' }));
+});
+
+connect();
+</script>
+</body>
+</html>

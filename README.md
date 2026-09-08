@@ -161,6 +161,10 @@ browser ── connects directly with that URL ──> agentcore_app/strands_age
   execution role needs `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream`
   on that ARN. Package `bedrock-agentcore` (see `lambda/requirements.txt`)
   into the deployment zip or a layer — it isn't in the base Lambda runtime.
+- **`agentcore_app/handoff.py` + `portal.html`** — the human handoff: an
+  escalation posts to Slack with a link to an agent portal, where a person
+  reads the conversation and joins the live call, taking Ava off the line.
+  See **Human handoff** below.
 - **`frontend/index.html`** — a single self-contained page: a customer-facing
   support site (hero, what Ava can do, how it works, FAQ) whose every
   **Call Ava** button — nav, hero dial pad, closing CTA, and the floating
@@ -230,6 +234,133 @@ If the lookup finds no policy, or no usable name, Ava opens with the same line
 minus the name — she never guesses one. A caller without a number never
 reaches this path at all (the UI requires one), but the backend still handles
 it the old way if a different client connects without metadata.
+
+### Human handoff (Slack → agent portal → live call)
+
+When Ava escalates, a person can take over the call she's already on — the
+caller stays on the same line and just starts hearing a human instead.
+
+```
+Ava escalates ──> Slack message (reason, summary, last lines, link)
+                      │  human clicks
+                      ▼
+              /portal?call=…&token=…    ← full transcript + escalation reason
+                      │  Join call
+                      ▼
+  caller browser <── audio ──> /ws <── audio ──> /portal/ws <── audio ──> human browser
+                                 │
+                                 └─ Nova Sonic left running but starved of input
+```
+
+- **`agentcore_app/handoff.py`** — the whole handoff: the per-call registry,
+  the Slack post, and the portal's routes (`/portal`, `/portal/api/call/{id}`,
+  `/portal/ws/{id}`), mounted on the same FastAPI app that serves `/ws`.
+- **`agentcore_app/portal.html`** — the agent console. Opens on one call:
+  why it escalated, Ava's summary, every field the escalate tool was called
+  with, and the conversation so far, still updating live. The human **hears
+  the call from the moment they open the link** — listening before taking over
+  is the point — and **Join call** puts them through, with mute and leave.
+
+  Two panels read the durable records rather than trusting only what this
+  process is holding, both fetched after the page opens (so neither delays it)
+  and re-fetchable with **Refresh**:
+
+  - **Conversation** comes from **AgentCore Memory** (short-term/session) —
+    the turns the agent itself persisted, keyed by the same actor id and
+    session id `strands_agent.py` writes under. Memory is written
+    asynchronously, so the newest turn or two usually isn't there yet: those
+    come from the live stream and are tagged `live`, and the panel's header
+    says which store it's showing. Memory unset or unreadable degrades to the
+    live stream with a note, never an error page.
+  - **Escalation record** is the row the gateway's escalate tool wrote to the
+    **`escalations` DynamoDB table** (`ESCALATIONS_TABLE`), fetched by
+    `escalationId` — status, `queueKey` priority, `createdAt`, TTL, captured
+    slots, `assignedAgentId`. That's what the rest of the contact centre acts
+    on, and it's rendered from whatever keys the row actually has, so a schema
+    change on the table side needs no change here.
+- **`_EscalationNotifierTool`** in `strands_agent.py` is what notices. Like
+  every other wrapper there it hardcodes no tool name: a successful result
+  carrying an escalation id *is* an escalation. Slack is posted from a
+  background task, so the caller isn't left in silence waiting on an HTTP
+  round trip.
+
+> **Writing an `AgentTool` wrapper: act on the result *inside* the loop.**
+> Strands' tool executor `return`s as soon as it sees a `ToolResultEvent`
+> (`strands/tools/executors/_executor.py`), which abandons the wrapper's async
+> generator — so anything written after the `async for` never runs. It fails
+> silently: the tool still works, the model still gets its result, and only
+> the wrapper's own effect goes missing. Every wrapper here therefore does its
+> work on the `ToolResultEvent` before yielding it.
+
+**Taking Ava off the line** is two functions in `voice_chat`, not a mode flag
+threaded through the app: `run()` pulls the caller's events in through one and
+pushes Ava's out through the other, so while a human is on the call the first
+sends the caller's audio to the portal instead of the model, and the second
+drops Ava's audio and transcript. Nova Sonic keeps running rather than being
+stopped — stopping it would end `run()`, which would end the call the human
+just joined. When the human leaves, the call goes back to Ava rather than to
+dead air.
+
+**It is fed silence, not nothing** (`KEEPALIVE_SECONDS`). Nova Sonic ends a
+session after ~55s without audio, with `Timed out waiting for audio bytes or
+interactive content`, and that exception ends `run()` and drops the caller
+mid-call. Three ordinary things stop the audio: a human taking over, the
+caller pressing mute (the browser then sends nothing at all), and the caller's
+tab going to the background, where the throttled main thread stops flushing
+mic frames — which is easy to trigger by opening the portal link in another
+tab of the same browser. So whenever no real caller audio is arriving, a 100ms
+frame of silence goes in its place: exactly what a live mic sends in a quiet
+room. The receive task is held across those timeouts rather than re-created,
+so a caller message arriving as one expires isn't lost.
+
+Configure it in `.env` (all optional — with no Slack token the portal link is
+printed to the server log instead, which is enough to work locally):
+
+```bash
+SLACK_BOT_TOKEN=xoxb-…                            # needs chat:write
+SLACK_ESCALATION_CHANNEL=#contact-center-escalations
+PORTAL_BASE_URL=http://127.0.0.1:8080             # origin the Slack link points at
+HANDOFF_RETENTION_SECONDS=1800                    # how long an ended call stays readable
+HANDOFF_ADMIN_TOKEN=                              # unset = /portal/queue disabled
+ESCALATIONS_TABLE=escalations                     # the queue table the portal reads
+# MEMORY_ID / MEMORY_REGION are the same ones the agent already uses.
+```
+
+**Where the link is.** An escalation puts it in two places: the Slack message,
+and one line on the agent's stdout —
+
+```
+[handoff] escalation on call 7d3e9486460e — portal: http://127.0.0.1:8080/portal?call=…&token=…
+```
+
+Lose both and the call is unreachable, because the token can't be
+reconstructed. So set `HANDOFF_ADMIN_TOKEN` to any secret string and
+`/portal/queue?token=<that>` lists this instance's calls with a link into
+each escalated one. It's off unless that variable is set — the page shows
+every call's bearer token at once, which is strictly more exposure than a
+single link.
+
+Two limits to know before this fronts real callers:
+
+- **Access is one per-escalation token**, minted when the call escalates and
+  sent only to Slack. Both portal endpoints require it, and an unauthorized
+  socket is refused before it's accepted. But anyone holding that Slack
+  message — or the URL after someone forwards it — can listen to and speak
+  with the caller. A real deployment wants an identity check in front of
+  `/portal`.
+- **State is in this process's memory**, which is the honest scope: one
+  container. A portal link only resolves on the instance holding that call, so
+  more than one instance behind the same endpoint needs sticky routing to it
+  (or this state moved somewhere shared, with a relay both instances reach).
+  Ended calls are kept `HANDOFF_RETENTION_SECONDS` so a late click still shows
+  the conversation, then dropped; AgentCore Memory remains the durable record.
+- **On AgentCore Runtime the portal needs its own way in.** Callers reach the
+  runtime through `InvokeAgentRuntimeWithWebSocketStream` (a signed WebSocket
+  invocation), not as an ordinary HTTP origin — so a plain
+  `https://…/portal` GET isn't served by that path, and `PORTAL_BASE_URL`
+  has to point at something that does route to the container (an ALB or API
+  Gateway in front of port 8080). Locally, where `strands_agent.py` is just a
+  uvicorn server, `http://127.0.0.1:8080` works as-is.
 
 ### Run it locally (no AWS deploy needed)
 
