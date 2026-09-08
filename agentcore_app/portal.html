@@ -382,6 +382,9 @@
   </div>
 </main>
 
+<!-- Only present when this page is hosted separately from the agent (see
+     amplify.yml). A 404 here means same-origin, which is the default. -->
+<script src="config.js"></script>
 <script>
 // ------------------------------------------------------------------ params
 // The call and its token come from the Slack link, never from anything typed
@@ -389,6 +392,24 @@
 const params = new URLSearchParams(location.search);
 const CALL_ID = params.get('call') || '';
 const TOKEN = params.get('token') || '';
+
+// Where the agent is. Empty means "this same origin", which is the case when
+// the agent serves this page itself (GET /portal) — the default, and what a
+// local run does. A static host (Amplify) serves the page from a different
+// origin, so the build writes config.js next to it with the agent's origin;
+// the agent then needs that origin in PORTAL_ALLOWED_ORIGINS to accept the
+// cross-origin fetch and socket.
+const API_BASE = String(window.AVA_PORTAL_CONFIG?.apiBase || '').trim().replace(/\/+$/, '');
+
+const apiUrl = (path) => `${API_BASE}${path}`;
+
+function wsUrl(path) {
+  if (!API_BASE) {
+    return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`;
+  }
+  // https -> wss, http -> ws; anything else is already a socket scheme.
+  return API_BASE.replace(/^http(s?):\/\//, (_, s) => `ws${s}://`) + path;
+}
 
 const el = (id) => document.getElementById(id);
 const topStatus = el('topStatus'), topTimer = el('topTimer'), topCallId = el('topCallId');
@@ -823,7 +844,7 @@ async function connect() {
   // identical from here. This endpoint distinguishes them, and doubles as the
   // first render so the page isn't blank while the socket opens.
   try {
-    const res = await fetch(`/portal/api/call/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`);
+    const res = await fetch(apiUrl(`/portal/api/call/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`));
     if (res.status === 403) {
       showDead('This handoff link isn’t valid',
         'The call may have ended some time ago, or this link’s token doesn’t match. Ask for a fresh escalation link in Slack.');
@@ -837,8 +858,7 @@ async function connect() {
     return;
   }
 
-  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${scheme}://${location.host}/portal/ws/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`);
+  ws = new WebSocket(wsUrl(`/portal/ws/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`));
 
   // The socket's own first snapshot supersedes the pre-flight one (a line may
   // have been spoken in between), and renderCall replaces rather than appends.

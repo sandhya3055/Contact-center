@@ -1453,6 +1453,11 @@ app = FastAPI()
 # AgentCore Runtime only requires /ws and /ping; these are extra routes on the
 # same app, which is what lets a human join a call this process is holding.
 app.include_router(handoff.router)
+# Mounting the portal's routes and applying its cross-origin policy are one
+# step, so a deployment that hosts portal.html elsewhere can't end up serving
+# a page that loads and then silently can't fetch. A no-op unless
+# PORTAL_ALLOWED_ORIGINS is set.
+handoff.install_portal_cors(app)
 
 
 @app.get("/ping")

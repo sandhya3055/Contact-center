@@ -84,6 +84,23 @@ ADMIN_TOKEN = os.getenv("HANDOFF_ADMIN_TOKEN")
 # - The escalations DynamoDB table: the queue row the gateway's escalate tool
 #   wrote — status, priority key, TTL, captured slots — which is what the rest
 #   of the contact centre acts on, not the tool arguments Ava passed.
+# Origins allowed to reach the portal API and socket from a browser, when the
+# portal page is hosted somewhere other than this process (a static host like
+# Amplify) — comma-separated, e.g.
+# "https://main.d123.amplifyapp.com,https://agents.example.com".
+#
+# Unset (the default) means the page is served by this app on the same origin,
+# where neither CORS nor an origin check is involved at all. Once set, both
+# are enforced: CORS for the fetch, and an explicit Origin check on the
+# WebSocket — browsers do not apply the same-origin policy to WebSockets, so
+# without that check any page on the internet holding a leaked token could
+# open a live caller's audio bridge.
+PORTAL_ALLOWED_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("PORTAL_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 MEMORY_ID = os.getenv("MEMORY_ID", "")
 MEMORY_REGION = os.getenv("MEMORY_REGION") or os.getenv("AWS_REGION", "us-west-2")
 ESCALATIONS_TABLE = os.getenv("ESCALATIONS_TABLE", "escalations")
@@ -575,9 +592,46 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
 router = APIRouter()
 
 
+def install_portal_cors(app: Any) -> None:
+    """Allow the configured origins to call the portal API cross-origin.
+
+    Lives here rather than beside the app's construction so that mounting
+    `router` and applying its access policy are one decision — forgetting the
+    second half yields a portal that loads and then silently can't fetch.
+    Scoped to GET, no credentials: the portal authenticates with the
+    per-escalation token in the query string, not a cookie.
+    """
+    if not PORTAL_ALLOWED_ORIGINS:
+        return
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=PORTAL_ALLOWED_ORIGINS,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+        allow_credentials=False,
+    )
+    print(f"[handoff] portal CORS enabled for {PORTAL_ALLOWED_ORIGINS}")
+
+
 def _authorized(call_id: str, token: str) -> LiveCall | None:
     call = LIVE_CALLS.get(call_id)
     return call if call is not None and call.token_matches(token) else None
+
+
+def origin_allowed(origin: str | None) -> bool:
+    """Whether a browser at `origin` may open the portal socket.
+
+    No allowlist configured means the portal is served by this app and reached
+    on its own origin, so there is nothing to check. With one configured, the
+    check is mandatory: CORS would cover the fetch, but a WebSocket handshake
+    is exempt from the same-origin policy, so this is the only thing standing
+    between a leaked token on some other site and a live caller's audio.
+    """
+    if not PORTAL_ALLOWED_ORIGINS:
+        return True
+    return bool(origin) and origin.rstrip("/") in PORTAL_ALLOWED_ORIGINS
 
 
 @router.get("/portal")
@@ -669,6 +723,13 @@ async def portal_call(call_id: str, token: str = "") -> JSONResponse:
 async def portal_ws(websocket: WebSocket, call_id: str, token: str = "") -> None:
     """The human agent's end of the call: transcript updates and call audio
     down, join/leave and mic audio up."""
+    origin = websocket.headers.get("origin")
+    if not origin_allowed(origin):
+        print(f"[handoff] refused portal socket from origin {origin!r} "
+              f"(allowed: {PORTAL_ALLOWED_ORIGINS})")
+        await websocket.close(code=4403)
+        return
+
     call = _authorized(call_id, token)
     if call is None:
         # Refused before accept(), so an unauthorized socket never reaches a

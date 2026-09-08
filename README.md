@@ -362,6 +362,51 @@ Two limits to know before this fronts real callers:
   Gateway in front of port 8080). Locally, where `strands_agent.py` is just a
   uvicorn server, `http://127.0.0.1:8080` works as-is.
 
+### Hosting the pages on AWS Amplify
+
+[`amplify.yml`](amplify.yml) at the repo root builds both pages. There's no
+build tooling — the only step is writing the `config.js` each page reads,
+which `.env` supplies locally and Amplify environment variables supply here.
+
+**Customer page** — set one variable and deploy:
+
+```
+CALL_ENDPOINT = https://<presign-lambda-url>/       # or wss://<...>
+```
+
+It must be `https://` or `wss://`: an Amplify page is served over HTTPS, and a
+secure page can't open a `ws://` socket or `fetch` over `http://` — the
+browser blocks it as mixed content and the call silently fails to connect. The
+build fails early on a `ws://localhost` value rather than shipping a dead call
+button. The presign Lambda also needs CORS for the Amplify origin, since the
+page fetches it cross-origin. (Serving over HTTPS has a side benefit: it's a
+secure context, so the microphone works — a `file://` page can't load the
+AudioWorklet module in current Chrome.)
+
+**Agent portal** — the portal has no data of its own: the transcript, the
+escalation and the audio bridge all live in the agent process. Hosting the page
+elsewhere therefore takes three settings, one on Amplify and two on the agent:
+
+```
+# Amplify
+PORTAL_API_BASE        = https://<agent-origin>        # where the page calls
+# agent
+PORTAL_ALLOWED_ORIGINS = https://<amplify-domain>      # CORS + WS origin check
+PORTAL_BASE_URL        = https://<amplify-domain>      # so Slack links point here
+```
+
+`PORTAL_API_BASE` unset skips the portal entirely, which is the right choice
+when the agent serves it itself at `GET /portal`. When set, the page ships as
+`dist/portal/index.html`, so the `/portal` path the Slack link already builds
+resolves with no Amplify rewrite rule to maintain.
+
+The agent must be reachable from a browser over `https`/`wss`, which on
+AgentCore Runtime means an ALB or API Gateway in front of port 8080 — the
+runtime's own invocation path isn't an ordinary HTTPS origin. And once the
+portal is internet-facing, put real authentication in front of it (Amplify
+access control, Cognito, or an authenticated ALB rule); the per-escalation
+token is a reasonable gate on localhost and a thin one on the public internet.
+
 ### Run it locally (no AWS deploy needed)
 
 Runs `strands_agent.py` on your machine and points the browser UI straight
