@@ -161,18 +161,75 @@ browser ── connects directly with that URL ──> agentcore_app/strands_age
   execution role needs `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream`
   on that ARN. Package `bedrock-agentcore` (see `lambda/requirements.txt`)
   into the deployment zip or a layer — it isn't in the base Lambda runtime.
-- **`frontend/index.html`** — a single self-contained page: enter your
-  caller mobile number (optional — lets Ava skip asking for it out loud;
-  sent as one `{"type": "bidi_call_metadata", ...}` message right after the
-  socket opens, see `strands_agent.py`) and, under **Connection settings**,
-  your Lambda's endpoint URL (Function URL or API Gateway) or a direct
-  `ws://`/`wss://` URL for local testing. Click **Talk to Ava** and it
-  fetches the presigned URL (skipped for a `ws://`/`wss://` endpoint — see
-  below), opens the WebSocket, streams mic audio as base64 PCM16/16kHz
-  (`{"type": "bidi_audio_input", ...}`), plays back Ava's audio
-  (`{"type": "bidi_audio_stream", ...}`), and shows a live, fixed-height
-  scrollable transcript. No build step — open it directly, or serve it from
-  anywhere static.
+- **`frontend/index.html`** — a single self-contained page: a customer-facing
+  support site (hero, what Ava can do, how it works, FAQ) whose every
+  **Call Ava** button — nav, hero dial pad, closing CTA, and the floating
+  button that follows you down the page — opens the same call panel. The panel
+  asks for one thing before the call: your registered mobile number, sent as a
+  `{"type": "bidi_call_metadata", ...}` message right after the socket opens.
+  That's what lets Ava look your policy up *before* she speaks and open with
+  your name (see the opening sequence below), so unlike previous versions it's
+  required, not optional. Where the call goes isn't asked at all — it comes
+  from `CALL_ENDPOINT` in `.env` via `frontend/config.js` (see
+  **Configuring the endpoint**). Hit **Call
+  Ava** and it fetches the presigned URL (skipped for a `ws://`/`wss://`
+  endpoint — see below), opens the WebSocket, streams mic audio as base64
+  PCM16/16kHz (`{"type": "bidi_audio_input", ...}`), and plays back Ava's
+  audio (`{"type": "bidi_audio_stream", ...}`). During the call you get a
+  live scrollable transcript, a call timer, an avatar that pulses with Ava's
+  speech and a level meter for your own mic (both fed by `AnalyserNode`s),
+  plus two controls: **Mute** — which drops captured audio instead of sending
+  it, so nothing recorded while muted is flushed on unmute — and **End call**.
+  No build step — open it directly, or serve it from anywhere static.
+
+### Configuring the endpoint
+
+The page has no connection-settings UI: which endpoint a call goes to is
+deployment config, not something a caller should type in. It lives in `.env`
+with everything else:
+
+```bash
+# .env — a presign Lambda Function URL when deployed, or this when running
+# strands_agent.py locally:
+CALL_ENDPOINT=ws://127.0.0.1:8080/ws
+```
+
+`index.html` is opened straight from disk, and a `file://` page can't read
+`.env` (or `fetch()` anything beside it), so one small generator bridges the
+gap — run it after any change to `CALL_ENDPOINT`:
+
+```bash
+python frontend/make_config.py   # writes frontend/config.js from .env
+```
+
+That writes `window.AVA_CONFIG.callEndpoint` into `frontend/config.js`, which
+the page loads. `config.js` is generated and gitignored; until it exists the
+call button is disabled and the panel says which command to run.
+
+### The opening sequence (lookup, then greet by name)
+
+With a mobile number entered, Ava's first action on a call isn't speech — it's
+the gateway's policy lookup for that number. Only once the result is back does
+she speak, opening with the caller's first name from the policy and
+introducing herself in the same breath ("Hello Priya, I'm Ava, your AI
+Assistant. I can help with…"), then handling whatever they need.
+
+Two details worth knowing if you change this:
+
+- It's appended to the **system prompt** per call (`strands_agent.py`, right
+  after the mobile number is resolved), not to the kickoff text. The base
+  prompt scripts an exact opening line, and a user-role nudge doesn't reliably
+  beat that — system-level text saying which of the two openings applies does.
+  It also means this keeps working when the prompt comes from Bedrock Prompt
+  Management (`BEDROCK_PROMPT_ID`), with no console edit needed to match.
+- No tool is named in it, in keeping with the rest of this project: the
+  addendum describes the lookup by what it does and lets the model pick from
+  whatever the gateway currently exposes.
+
+If the lookup finds no policy, or no usable name, Ava opens with the same line
+minus the name — she never guesses one. A caller without a number never
+reaches this path at all (the UI requires one), but the backend still handles
+it the old way if a different client connects without metadata.
 
 ### Run it locally (no AWS deploy needed)
 
@@ -187,27 +244,31 @@ pip install -r requirements.txt
 python strands_agent.py
 ```
 
-Then open `frontend/index.html` directly in a browser (double-click it, or
-`open frontend/index.html`) and, under **Connection settings**, set the
-endpoint field to:
+Point the page at it and open it:
+
+```bash
+# in .env: CALL_ENDPOINT=ws://127.0.0.1:8080/ws
+python frontend/make_config.py
+open frontend/index.html
 ```
-ws://127.0.0.1:8080/ws
-```
+
 The frontend detects a `ws://`/`wss://` endpoint and connects to it
 directly instead of treating it as a presign Lambda to `fetch()` first.
-Click **Talk to Ava**.
+Enter your registered mobile number and click **Call Ava** (any call button
+on the page opens the call panel).
 
 ### Run it after deploying
 
 Once `agentcore_app/DEPLOY.md`'s steps are done, you'll have an Agent
 Runtime ARN and a Lambda Function URL in front of it:
 
-1. Open `frontend/index.html` (same file, no separate build/hosting step
-   required — or serve it from S3/CloudFront/any static host).
-2. Under **Connection settings**, set the endpoint field to your Lambda's
-   Function URL (or API Gateway URL) — the one whose only job is minting a
-   presigned WebSocket URL for your runtime ARN.
-3. Optionally enter a caller mobile number, then click **Talk to Ava**.
+1. Set `CALL_ENDPOINT` in `.env` to your Lambda's Function URL (or API
+   Gateway URL) — the one whose only job is minting a presigned WebSocket URL
+   for your runtime ARN — then run `python frontend/make_config.py`.
+2. Open `frontend/index.html` (same file, no separate build/hosting step
+   required — or serve it, plus the generated `config.js`, from
+   S3/CloudFront/any static host).
+3. Enter the caller's registered mobile number, then click **Call Ava**.
 
 **Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
 Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**

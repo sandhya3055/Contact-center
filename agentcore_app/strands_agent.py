@@ -1412,6 +1412,43 @@ async def voice_chat(websocket: WebSocket) -> None:
             recent_digits.seed(mobile_number)
             known_mobile_number[0] = mobile_number
 
+            # Opening sequence for a caller who identified themselves in the
+            # app: look their policy up *before* saying anything, then greet
+            # them by the name on it.
+            #
+            # This is appended to the system prompt rather than left to the
+            # kickoff text below because the base prompt (local
+            # SYSTEM_INSTRUCTION or, when BEDROCK_PROMPT_ID is set, whatever
+            # Bedrock Prompt Management currently holds) scripts an exact
+            # opening line. A user-role nudge doesn't reliably beat that;
+            # system-level text that says which of the two openings applies
+            # to this call does — and it keeps working without anyone having
+            # to edit the managed prompt in the console to match.
+            #
+            # No tool is named here (same reason as everywhere else in this
+            # file): the gateway's tool set is discovered live, so this
+            # describes the tool by what it does and lets the model pick it.
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "Opening sequence for this call — this replaces any scripted "
+                "opening line in the instructions above.\n"
+                "The caller identified themselves in the app before the call, so:\n"
+                "1. Say nothing at all yet. Your first action is to look up their "
+                "policy by that mobile number. No greeting, no \"one moment\", no "
+                "sound of any kind before the result comes back.\n"
+                "2. When it comes back, greet them by the first name on the policy "
+                "and introduce yourself in the same turn — for example: \"Hello "
+                "<first name>, I'm Ava, your AI Assistant. I can help with your "
+                "policy details, register a claim, or connect you with a human "
+                "agent.\" Use the name exactly as the lookup gave it; the first "
+                "name alone is enough. Then listen.\n"
+                "3. If the lookup returns no policy, or no name you can use, open "
+                "with that same line minus the name and carry on under the normal "
+                "rules — never guess, shorten or invent a name.\n"
+                "You already have the caller's details from this lookup, so don't "
+                "ask them for the number, mention the lookup, or repeat it."
+            )
+
         # A caller who didn't pre-fill their number gets a per-call actor id
         # instead: this call still gets session memory (and shows up whole in
         # observability), but there's nothing stable to tie it to a previous
@@ -1473,8 +1510,9 @@ async def voice_chat(websocket: WebSocket) -> None:
                 "that correction overrides it — confirm the new number the normal "
                 "way (read it back one digit at a time, get an explicit yes) and "
                 "use only that confirmed number from then on, never falling back "
-                "to this original one. Greet the caller in one short sentence, "
-                "then look up their policy — begin now)"
+                "to this original one. Follow the opening sequence in your "
+                "instructions: look up the policy first, say nothing until the "
+                "result is back, then greet them by name — begin now)"
             )
         else:
             greeting_text = "(the call has just connected — begin now)"
