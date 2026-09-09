@@ -417,11 +417,15 @@ therefore presigns `/ws` with the *caller's* session id and names the call in
 its first frame (`{"type":"portal_attach","call":…,"token":…}`); the agent
 branches on that frame and hands the connection to the same bridge the direct
 route uses. Nothing to configure — but two things have to be true, and both are
-reported in the container's log per call:
+reported in the container's log per call (`runtime session: …`, or `unknown`,
+which serves records and refuses joins):
 
-- the caller's page must report its session id, which it reads out of the
-  presigned URL it was handed (`frontend/index.html`). A container that logs
-  `runtime session: unknown` will serve records and refuse joins.
+- the container has to learn the Runtime session id. Runtime forwards it on the
+  handshake as `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, and that's the
+  source used — confirmed on the deployed runtime by a client that sent no
+  messages at all and was still logged with the right id. `frontend/index.html`
+  also reports it, read out of the presigned URL it was handed, as a fallback
+  for if that ever stops being true.
 - the escalations row must carry `portalRuntimeSessionId`, which needs the
   `UpdateItem` above.
 

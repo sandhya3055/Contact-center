@@ -1642,11 +1642,14 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         # time (see handoff._persist_portal_keys) — nothing else in the system
         # can discover it.
         #
-        # Two sources because neither is guaranteed: Runtime may forward its
-        # own session header through the WebSocket handshake, and the caller's
-        # page can read the id out of the presigned URL it was handed. The
-        # header wins when it's there, since it's the platform's own view of
-        # the routing rather than a client's claim about it.
+        # Runtime does forward its own session header through the WebSocket
+        # handshake — confirmed on the deployed runtime by a client that sent
+        # no messages at all and was still logged with the right session id —
+        # and that's the source used. The caller page's own report (read out of
+        # the presigned URL it was handed) is a fallback for if that ever
+        # stops being true: the header is the platform's view of where it
+        # actually routed this connection, which beats a client's claim about
+        # it, so it wins whenever both are present.
         runtime_session_id = websocket.headers.get(
             "x-amzn-bedrock-agentcore-runtime-session-id") or ""
         if not runtime_session_id:

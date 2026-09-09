@@ -525,10 +525,11 @@ proof and otherwise says the call couldn't be found.
 
 Two things have to be true, and the container's log says so once per call:
 
-- **the caller's page reports its Runtime session id**, read out of the
-  presigned URL it was handed. Nothing else can discover it — Runtime doesn't
-  reliably forward it to the container — and a call that logs `runtime session:
-  unknown` will serve records and refuse joins.
+- **the container knows the Runtime session id.** Runtime forwards it on the
+  handshake as `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, and that's what
+  is used; the caller's page also reports it, read out of the presigned URL it
+  was handed, as a fallback. A call that logs `runtime session: unknown` will
+  serve records and refuse joins.
 - **the escalations row carries `portalRuntimeSessionId`**, which needs the
   agent role's `dynamodb:UpdateItem`.
 
