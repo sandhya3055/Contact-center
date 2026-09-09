@@ -19,6 +19,17 @@ What this adds to a call that strands_agent.py is already running:
                                   |
                                   +-- Nova Sonic (starved of input while a human is on)
 
+Two doors, one bridge. `/portal/ws/{call_id}` above is the direct one, used
+whenever the human's browser can reach this process as an ordinary origin — a
+local run, or a deployment behind an ALB. On AgentCore Runtime it cannot: the
+platform publishes exactly one WebSocket path per container (`/ws`) behind a
+SigV4-signed endpoint and routes a connection to an instance by session id, so
+there is no URL a browser could point at `/portal/ws/...` at all. `serve_portal_socket`
+below is that second door: the human presigns `/ws` with the *caller's* session
+id — which is what lands them in the container holding the call — and names the
+call in their first frame instead of in the path. Past that handshake both doors
+run the same code (`_serve_portal`), so the bridge itself has one implementation.
+
 Everything lives in this process's memory (LIVE_CALLS), which is the honest
 scope of this implementation: one running container. Two consequences worth
 knowing before deploying more than one instance --
@@ -110,6 +121,12 @@ MEMORY_REGION = os.getenv("MEMORY_REGION") or os.getenv("AWS_REGION", "us-west-2
 ESCALATIONS_TABLE = os.getenv("ESCALATIONS_TABLE", "escalations")
 ESCALATIONS_REGION = os.getenv("ESCALATIONS_REGION") or os.getenv("AWS_REGION", "us-west-2")
 
+# The first frame a human agent's portal sends on the agent's own /ws, saying
+# which call it wants to bridge into. Named as a type rather than inferred from
+# the message's shape so a caller page can never accidentally be read as one:
+# strands_agent.py branches on exactly this value and nothing else.
+PORTAL_ATTACH_TYPE = "portal_attach"
+
 STATE_AI = "ai"                # Ava has the call
 STATE_ESCALATED = "escalated"  # a human was asked for; nobody has joined yet
 STATE_HUMAN = "human"          # a human is on the line and Ava is off it
@@ -159,6 +176,14 @@ class LiveCall:
         # caller's number (and so the actor id) is known.
         self.memory_actor_id: str | None = None
         self.memory_session_id: str | None = None
+
+        # The AgentCore Runtime session this call's socket arrived on, when
+        # there is one. This is the only thing that routes a second connection
+        # to this same container, so it's what a human agent has to presign
+        # with to join — see serve_portal_socket. Set by strands_agent.py from
+        # the connection itself; None on a local run, where the portal reaches
+        # this process directly and needs no routing hint.
+        self.runtime_session_id: str | None = None
 
         # Set by strands_agent.py once the caller's socket is up: how to send
         # an event to the caller's browser.
@@ -322,6 +347,12 @@ class LiveCall:
             fields["memoryActorId"] = {"S": self.memory_actor_id}
         if self.memory_session_id:
             fields["memorySessionId"] = {"S": self.memory_session_id}
+        # What lets a portal hosted off this container actually *join*, not just
+        # read: the presigner has no other way to learn which Runtime session
+        # to sign for, and signing for any other one reaches a different
+        # container where this call does not exist.
+        if self.runtime_session_id:
+            fields["portalRuntimeSessionId"] = {"S": self.runtime_session_id}
         try:
             # An in-region UpdateItem is tens of milliseconds; this cap is for
             # the pathological case, and it's short because notify_slack waits
@@ -467,6 +498,18 @@ def register_call(mobile_number: str | None = None) -> LiveCall:
     call = LiveCall(mobile_number)
     LIVE_CALLS[call.call_id] = call
     return call
+
+
+def unregister_call(call: LiveCall) -> None:
+    """Drop a call that turned out never to be one.
+
+    strands_agent.py registers a call as soon as a socket is accepted, before
+    the first frame says whether the client is a caller or a human agent
+    joining an existing call. A portal connection would otherwise leave a
+    caller-less entry behind, which /portal/queue lists as a real call and
+    _prune_calls never collects (it only expires ENDED ones).
+    """
+    LIVE_CALLS.pop(call.call_id, None)
 
 
 # ---------------------------------------------------------------- Slack
@@ -715,8 +758,13 @@ async def portal_call(call_id: str, token: str = "") -> JSONResponse:
 
 @router.websocket("/portal/ws/{call_id}")
 async def portal_ws(websocket: WebSocket, call_id: str, token: str = "") -> None:
-    """The human agent's end of the call: transcript updates and call audio
-    down, join/leave and mic audio up."""
+    """The human agent's end of the call, reached directly: transcript updates
+    and call audio down, join/leave and mic audio up.
+
+    Usable whenever the human's browser can address this process as an ordinary
+    origin. On AgentCore Runtime it cannot — see serve_portal_socket, which is
+    the same bridge entered through the one path Runtime does publish.
+    """
     origin = websocket.headers.get("origin")
     if not origin_allowed(origin):
         print(f"[handoff] refused portal socket from origin {origin!r} "
@@ -733,6 +781,78 @@ async def portal_ws(websocket: WebSocket, call_id: str, token: str = "") -> None
         return
 
     await websocket.accept()
+    await _serve_portal(websocket, call)
+
+
+def is_portal_attach(message: Any) -> bool:
+    """Whether a client's first frame on /ws is a human agent joining a call
+    rather than a caller starting one."""
+    return isinstance(message, dict) and message.get("type") == PORTAL_ATTACH_TYPE
+
+
+async def serve_portal_socket(websocket: WebSocket, attach: dict[str, Any]) -> None:
+    """The human agent's end of the call, reached through the agent's own /ws.
+
+    The door that works on AgentCore Runtime. Runtime publishes one WebSocket
+    path per container and chooses the instance from the session id in the
+    signed URL, so a portal cannot ask for /portal/ws/{call_id}: it presigns
+    /ws with the caller's own session id — putting it in this container — and
+    puts the call id and token in its first frame instead of in the path.
+
+    The socket is already accepted when this is called (whoever accepted it had
+    to, in order to read that frame), so an unauthorized one is told why and
+    then closed, rather than being refused at the handshake the way
+    /portal/ws/{call_id} refuses it. Saying why matters more here: a browser
+    sees a pre-accept refusal as a bare 1006, and on this path the two likely
+    causes — a stale link, and a call now held by a different instance — need
+    different actions from the person reading the page.
+
+    What authorizes this is the same per-escalation token as the other door,
+    plus something the direct door doesn't have: the presigned URL itself,
+    which only the portal-context Lambda can mint and only for someone who
+    already proved they hold that token.
+    """
+    call_id = str(attach.get("call") or "")
+    token = str(attach.get("token") or "")
+
+    origin = websocket.headers.get("origin")
+    # Advisory here, unlike portal_ws, where it's mandatory: whether Runtime
+    # forwards a browser's Origin through the signed handshake isn't this
+    # code's to decide, and refusing a connection for a header that simply
+    # never arrived would break every join. So it's enforced when present and
+    # skipped when absent — the presigned URL and the token are what actually
+    # gate this path, and neither is something a hostile page can obtain.
+    if origin is not None and not origin_allowed(origin):
+        print(f"[handoff] refused portal attach from origin {origin!r} "
+              f"(allowed: {PORTAL_ALLOWED_ORIGINS})")
+        await websocket.close(code=4403)
+        return
+
+    call = _authorized(call_id, token)
+    if call is None:
+        print(f"[handoff] portal attach refused for call {call_id!r} — "
+              f"{'not in this instance' if call_id not in LIVE_CALLS else 'bad token'}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": "This call isn't on this instance of the agent, or the link's "
+                           "token doesn't match it. If the caller is still on the line, "
+                           "ask for a fresh escalation link in Slack.",
+            })
+        except Exception:
+            pass
+        await websocket.close(code=4403)
+        return
+
+    print(f"[handoff] portal attached to call {call.call_id} over the runtime socket")
+    await _serve_portal(websocket, call)
+
+
+async def _serve_portal(websocket: WebSocket, call: LiveCall) -> None:
+    """The bridge itself, once the socket is accepted and authorized: snapshot
+    and durable records down, then transcript lines and call audio down while
+    join/leave and mic audio come up. Shared by both doors above so a human
+    agent gets identical behaviour whichever way they reached the call."""
     call.attach_portal(websocket)
 
     async def send_context() -> None:
@@ -773,6 +893,6 @@ async def portal_ws(websocket: WebSocket, call_id: str, token: str = "") -> None
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        print(f"[handoff] portal socket error on call {call_id}: {exc}")
+        print(f"[handoff] portal socket error on call {call.call_id}: {exc}")
     finally:
         await call.detach_portal(websocket)

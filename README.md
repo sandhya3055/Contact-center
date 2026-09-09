@@ -396,13 +396,25 @@ needs the agent container. Sorting that out is what makes it hostable at all:
 | Escalation reason, queue row, conversation | the escalations table + AgentCore Memory | **No** |
 | Live call state and the audio bridge (Join) | the process holding the caller's socket | **Yes** |
 
-So there are two variables, and they are not alternatives — set both for a
-working portal, or just the first for a read-only one:
+The second row is the awkward one on AgentCore Runtime, because that container
+has no browser-reachable origin: Runtime publishes one WebSocket path per
+container behind a SigV4-signed endpoint, and picks the instance from the
+session id in the signed URL. There is no host a portal could point at.
+
+So the portal doesn't try. It asks the portal-context Lambda for a **presigned
+socket onto the caller's own Runtime session** — the session id being exactly
+what routes it into the container holding that call — and then names the call in
+its first frame instead of in a URL path. Same bridge on the other side of that
+handshake; see [Joining a Runtime-hosted call](#joining-a-runtime-hosted-call).
+
+That makes `PORTAL_CONTEXT_URL` alone enough for a fully working portal, join
+included. `PORTAL_API_BASE` remains for the case where the agent *does* have a
+reachable origin (a local run, or ECS behind an ALB), and is then used directly:
 
 ```
-# Amplify
-PORTAL_CONTEXT_URL     = https://<portal-context-lambda-url>   # records
-PORTAL_API_BASE        = https://<agent-origin>                # live call + audio
+# Amplify — one of these is enough
+PORTAL_CONTEXT_URL     = https://<portal-context-lambda-url>   # records + a way in
+PORTAL_API_BASE        = https://<agent-origin>                # only if the agent has one
 # agent
 PORTAL_ALLOWED_ORIGINS = https://<amplify-domain>      # CORS + WS origin check
 PORTAL_BASE_URL        = https://<amplify-domain>      # so Slack links point here
@@ -413,13 +425,17 @@ serves it itself at `GET /portal`. With either set, the page ships as
 `dist/portal/index.html`, so the `/portal` path the Slack link already builds
 resolves with no Amplify rewrite rule to maintain.
 
-#### `PORTAL_CONTEXT_URL` — the records
+#### `PORTAL_CONTEXT_URL` — the records, and a way into the call
 
 [`lambda/portal_context_handler.py`](lambda/portal_context_handler.py) behind a
 Function URL. It reads the escalations row and AgentCore Memory directly, so it
 answers whether or not a container is still holding the call — which also means
 the portal keeps working after the call ends, where the agent's own registry
 drops it after `HANDOFF_RETENTION_SECONDS`.
+
+It also mints the presigned WebSocket URL the page joins with, when
+`AGENT_RUNTIME_ARN` is set. Both jobs start from the same check, which is why
+they're one endpoint rather than two.
 
 It shares
 [`agentcore_app/portal_context.py`](agentcore_app/portal_context.py) with the
@@ -429,11 +445,18 @@ memory events the same way. Deploy it with:
 ```
 ESCALATIONS_TABLE = escalations                    # same table the escalate tool writes
 MEMORY_ID         = <the agent's memory id>
+AGENT_RUNTIME_ARN = <the agent runtime's ARN>      # omit for a read-only portal
 ALLOWED_ORIGIN    = https://<amplify-domain>       # defaults to "*"
 ```
 
-and an execution role with `dynamodb:GetItem` on the table plus
-`bedrock-agentcore:ListEvents` on the memory resource. Package
+Set `ALLOWED_ORIGIN`: with `AGENT_RUNTIME_ARN` configured this endpoint hands
+out a credential, not just a transcript.
+
+and an execution role with `dynamodb:GetItem` on the table,
+`bedrock-agentcore:ListEvents` on the memory resource, and
+`bedrock-agentcore:InvokeAgentRuntime` on the runtime (that last one only for
+the join URL — without it the records still work and the page says why Join is
+unavailable). Package
 `boto3>=1.40` with it (`lambda/portal_context_requirements.txt`) — the
 runtime's bundled copy generally doesn't know the `bedrock-agentcore` client,
 and without it the row still loads while the conversation comes back as a note.
@@ -476,6 +499,40 @@ rewritten around it. An ALB passes WebSockets straight through.
 With `PORTAL_CONTEXT_URL` set and the agent unreachable, the page renders the
 records and disables Join with the reason, rather than failing whole — the
 commonest cause is benign (the call ended and the agent released it).
+
+#### Joining a Runtime-hosted call
+
+Nothing to configure beyond `AGENT_RUNTIME_ARN` above, but it's worth knowing
+what happens, because the shape is unusual and it's the only shape that can
+work on Runtime:
+
+```
+portal page ──fetch──► portal-context Lambda   (checks sha256(token) on the row,
+                                                reads portalRuntimeSessionId,
+                                                signs a wss:// for that session)
+            ──wss────► AgentCore Runtime ──► the container holding the call
+            ──frame──► {"type":"portal_attach","call":…,"token":…}
+```
+
+The agent's `/ws` branches on that first frame: a caller starts a voice call, a
+`portal_attach` becomes a portal bridge — the same one `/portal/ws/{call_id}`
+serves for a directly reachable agent, so joining behaves identically either
+way. Runtime accepts the handshake before the container has looked the call up,
+so an open socket proves nothing; the page treats the first `call_state` as the
+proof and otherwise says the call couldn't be found.
+
+Two things have to be true, and the container's log says so once per call:
+
+- **the caller's page reports its Runtime session id**, read out of the
+  presigned URL it was handed. Nothing else can discover it — Runtime doesn't
+  reliably forward it to the container — and a call that logs `runtime session:
+  unknown` will serve records and refuse joins.
+- **the escalations row carries `portalRuntimeSessionId`**, which needs the
+  agent role's `dynamodb:UpdateItem`.
+
+The URL is a real credential while it lives: scoped to one session id, expiring
+(`JOIN_URL_TTL_SECONDS`, default 15 minutes), minted only after the token check
+passes, and never logged.
 
 And once the portal is internet-facing, put real authentication in front of it
 (Amplify access control, Cognito, or an authenticated ALB rule); the

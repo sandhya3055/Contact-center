@@ -465,6 +465,11 @@ let timerInterval = null;
 // human on the call or only show them what happened. False until proven.
 let liveAvailable = false;
 let liveNote = '';
+// How to reach the live call when this page is hosted off the agent: a
+// presigned WebSocket URL onto the agent runtime, minted by the portal-context
+// Lambda for the caller's own Runtime session (which is what routes it to the
+// container holding the call), or a note saying why there isn't one.
+let joinInfo = null;
 
 function showDead(title, body) {
   deadTitle.textContent = title;
@@ -898,6 +903,11 @@ async function loadRecords({ first = false } = {}) {
     throw new Error('that endpoint didn’t answer with a call context');
   }
   memoryLines = data.memory;
+  // Captured on every load, not just the first: a refresh late in a call can
+  // pick up a join route the first load didn't have (the row is stamped
+  // asynchronously at escalation), and re-minting is what keeps the URL from
+  // going stale on a page left open.
+  if (data.join) joinInfo = data.join;
   renderConversation();
   renderRecord(data);
   // The row's view of the call, in snapshot shape — used for the first render
@@ -915,6 +925,104 @@ function setLiveUnavailable(note) {
 }
 
 // ------------------------------------------------------------------ socket
+// Two ways in, one socket protocol past the handshake:
+//
+//   same origin / a real agent origin  ->  /portal/ws/{call_id}?token=…
+//   AgentCore Runtime (no such path)   ->  presigned /ws, then a portal_attach
+//                                          frame naming the call
+//
+// `attachFrame` is what distinguishes them. Its presence also means liveness
+// isn't yet proven: Runtime accepts the handshake before the container has
+// looked the call up, so an open socket says nothing about whether this call
+// is on that instance — only the first call_state does. The other path proved
+// it over HTTP already, before getting here.
+function openSocket(url, attachFrame) {
+  ws = new WebSocket(url);
+
+  // The socket's own first snapshot supersedes any pre-flight one (a line may
+  // have been spoken in between), and renderCall replaces rather than appends.
+  let firstState = true;
+  let proven = !attachFrame;
+  let refused = '';
+
+  const proveOrGiveUp = (note) => {
+    if (proven) return;
+    proven = true;      // decided either way; don't report this twice
+    setLiveUnavailable(refused || note);
+    try { ws.close(); } catch (err) { /* already closing */ }
+  };
+
+  if (attachFrame) {
+    ws.onopen = () => ws.send(JSON.stringify(attachFrame));
+    // A presigned URL can also be expired or refused at the edge, which
+    // arrives as a close with no code — hence a deadline rather than waiting
+    // on an answer that may never come.
+    setTimeout(() => proveOrGiveUp(
+      'Reached the agent service, but it didn’t answer with this call in time. '
+      + 'Reload to try again — the join link is minted fresh each time.'), 12000);
+  }
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'call_state') {
+      // The container answered with the call, so it holds it: this page can
+      // put the human on the line.
+      if (!proven) {
+        proven = true;
+        liveAvailable = true;
+        consoleEl.hidden = false;
+      }
+      renderCall(data.call, firstState);
+      firstState = false;
+    } else if (data.type === 'transcript') {
+      addTranscriptLine(data.line);
+    } else if (data.type === 'context') {
+      // Ignored when the Lambda is the records source. The agent reads the
+      // same two services, but not necessarily successfully — a container
+      // without MEMORY_ID set, or without ListEvents on the memory resource,
+      // sends an empty conversation, and taking it would wipe the transcript
+      // the Lambda just loaded.
+      if (CONTEXT_URL && ESC_ID) return;
+      memoryLines = data.memory || [];
+      renderConversation();
+      renderRecord(data);
+      refreshBtn.disabled = false;
+    } else if (data.type === 'bidi_audio_stream' && data.audio) {
+      playChunk(data.source || 'caller', data.audio, data.sample_rate);
+    } else if (data.type === 'error') {
+      addSystemLine(data.message);
+      // On the runtime path this is the container's own explanation, sent just
+      // before it closes an unauthorized attach — worth far more than the
+      // generic timeout text, so it's remembered for proveOrGiveUp.
+      if (!proven) refused = data.message;
+    }
+  };
+
+  ws.onclose = () => {
+    // Closed before the call was ever confirmed: nothing was lost, this page
+    // simply never had a live call — say that instead of "connection lost".
+    if (!proven) {
+      proveOrGiveUp('Couldn’t open a line to the call. It may have ended, or the join '
+        + 'link may have expired — reload to get a fresh one.');
+      return;
+    }
+    topStatus.className = 'status ended';
+    topStatus.textContent = 'Disconnected';
+    joined = false;
+    liveAvailable = false;
+    stopMic();
+    liveControls.hidden = true;
+    onAir.hidden = true;
+    // Joining needs the socket, so the button must not look available: with it
+    // enabled a click reports "you joined the call" while send() silently
+    // discards the message on a closed socket.
+    joinBtn.disabled = true;
+    joinNote.textContent = 'Connection to the call service was lost. Reload to reconnect.';
+    el('callerBars').dataset.active = 'false';
+    addSystemLine('Portal disconnected.');
+  };
+}
+
 async function connect() {
   if (!CALL_ID || !TOKEN) {
     showDead('This link is incomplete',
@@ -946,11 +1054,21 @@ async function connect() {
     }
   }
 
+  // Preferred whenever it's on offer, and it's the only thing that works on
+  // AgentCore Runtime: a presigned socket straight onto the container holding
+  // the call. Takes precedence over API_BASE because it needs no reachable
+  // agent origin at all — there isn't one to have.
+  if (joinInfo?.ws_url) {
+    consoleEl.hidden = false;
+    openSocket(joinInfo.ws_url, { type: 'portal_attach', call: CALL_ID, token: TOKEN });
+    return;
+  }
+
   if (!API_BASE && HOSTED) {
-    // Hosted off the agent (config.js exists) with no agent origin configured:
-    // there is nothing to connect to, and falling back to same-origin would
-    // fetch this static host and get its 404 — reported as if the agent were
-    // down, which it may well not be.
+    // Hosted off the agent (config.js exists), with neither a join URL nor an
+    // agent origin: there is nothing to connect to, and falling back to
+    // same-origin would fetch this static host and get its 404 — reported as
+    // if the agent were down, which it may well not be.
     if (!haveRecords) {
       showDead('This portal has nothing to read',
         'Neither PORTAL_CONTEXT_URL nor PORTAL_API_BASE gave this page any data. Check the '
@@ -958,8 +1076,11 @@ async function connect() {
       return;
     }
     consoleEl.hidden = false;
-    setLiveUnavailable('This portal is configured for records only — no agent endpoint is set, '
-      + 'so the call can’t be joined from here.');
+    // The Lambda's own explanation when it has one — it knows which of the
+    // several reasons applies, and this page doesn't.
+    setLiveUnavailable(joinInfo?.note
+      || 'This portal is configured for records only — no agent endpoint is set, '
+         + 'so the call can’t be joined from here.');
     return;
   }
 
@@ -1010,53 +1131,9 @@ async function connect() {
     return;
   }
 
-  ws = new WebSocket(wsUrl(`/portal/ws/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`));
-
-  // The socket's own first snapshot supersedes the pre-flight one (a line may
-  // have been spoken in between), and renderCall replaces rather than appends.
-  let firstState = true;
-
-  ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'call_state') {
-      renderCall(data.call, firstState);
-      firstState = false;
-    } else if (data.type === 'transcript') {
-      addTranscriptLine(data.line);
-    } else if (data.type === 'context') {
-      // Ignored when the Lambda is the records source. The agent reads the
-      // same two services, but not necessarily successfully — a container
-      // without MEMORY_ID set, or without ListEvents on the memory resource,
-      // sends an empty conversation, and taking it would wipe the transcript
-      // the Lambda just loaded.
-      if (CONTEXT_URL && ESC_ID) return;
-      memoryLines = data.memory || [];
-      renderConversation();
-      renderRecord(data);
-      refreshBtn.disabled = false;
-    } else if (data.type === 'bidi_audio_stream' && data.audio) {
-      playChunk(data.source || 'caller', data.audio, data.sample_rate);
-    } else if (data.type === 'error') {
-      addSystemLine(data.message);
-    }
-  };
-
-  ws.onclose = () => {
-    topStatus.className = 'status ended';
-    topStatus.textContent = 'Disconnected';
-    joined = false;
-    liveAvailable = false;
-    stopMic();
-    liveControls.hidden = true;
-    onAir.hidden = true;
-    // Joining needs the socket, so the button must not look available: with it
-    // enabled a click reports "you joined the call" while send() silently
-    // discards the message on a closed socket.
-    joinBtn.disabled = true;
-    joinNote.textContent = 'Connection to the call service was lost. Reload to reconnect.';
-    el('callerBars').dataset.active = 'false';
-    addSystemLine('Portal disconnected.');
-  };
+  openSocket(
+    wsUrl(`/portal/ws/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`),
+    null);
 }
 
 // ------------------------------------------------------------------ actions

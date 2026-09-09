@@ -31,7 +31,7 @@ _boto3 = None  # imported lazily: a caller that never asks pays nothing
 # that has no business being rendered in a browser.
 PORTAL_ROW_KEYS = frozenset({
     "portalCallId", "portalTokenHash", "portalStartedAt", "portalEscalatedAt",
-    "portalDetails", "memoryActorId", "memorySessionId",
+    "portalDetails", "portalRuntimeSessionId", "memoryActorId", "memorySessionId",
 })
 
 

@@ -1490,12 +1490,47 @@ async def ping():
     return {"status": "Healthy", "time_of_last_update": int(datetime.now().timestamp())}
 
 
+# A Runtime session id is chosen by whoever presigns the URL, so it reaches
+# this process as client-controlled text and then travels on to a DynamoDB
+# attribute and into a signed URL's query string. Bounded to the characters
+# AgentCore itself accepts before any of that.
+_RUNTIME_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@\-]{8,200}$")
+
+
 @app.websocket("/ws")
 async def voice_chat(websocket: WebSocket) -> None:
-    """WebSocket endpoint for one bidirectional voice call.
+    """The one WebSocket path this container publishes — and two kinds of
+    client arrive on it.
+
+    Normally a caller: _serve_caller runs their voice call, and returns None.
+
+    But AgentCore Runtime gives a container exactly this one path and picks the
+    instance from the session id in the signed URL, so a human agent joining a
+    live call has no other endpoint they could possibly use. They presign this
+    path with the *caller's* session id — which is what routes them into the
+    container holding that call — and their first frame says which call they
+    want (handoff.PORTAL_ATTACH_TYPE). _serve_caller hands that frame straight
+    back here, untouched, and the connection becomes a portal instead.
+
+    The dispatch is out here, rather than inside _serve_caller, because a
+    portal socket must survive that function's teardown: its `finally` ends a
+    call and closes the socket, both of which are exactly wrong for a
+    connection that is only now starting to do its job.
+    """
+    attach = await _serve_caller(websocket)
+    if attach is not None:
+        await handoff.serve_portal_socket(websocket, attach)
+
+
+async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
+    """One bidirectional voice call, or None—see voice_chat.
 
     A fresh BidiAgent and gateway connection are created per call, so
     concurrent callers never share state (session_id, tool results, etc).
+
+    Returns the portal attach frame if this connection turns out to be a human
+    agent rather than a caller, having left the socket open and untouched for
+    voice_chat to hand on. Returns None for every real call.
     """
     mcp_client = MCPClient(
         transport_callable=lambda: aws_iam_streamablehttp_client(
@@ -1524,6 +1559,11 @@ async def voice_chat(websocket: WebSocket) -> None:
     # copy from whenever they captured it. Also out here so the memory
     # write at teardown can read the final confirmed number.
     known_mobile_number: list[str | None] = [None]
+
+    # Set when the first frame reveals this isn't a caller at all. Read by the
+    # teardown below, which must then leave the socket (and the call this
+    # connection is joining) alone — see voice_chat.
+    handed_to_portal = False
 
     # build_gateway_tools() -> load_tools() starts mcp_client's own
     # background connection lazily; wrapping this in `with mcp_client:`
@@ -1561,14 +1601,62 @@ async def voice_chat(websocket: WebSocket) -> None:
         # concurrently with the tools/prompt loads below so it doesn't add
         # latency. A client that never sends it (or sends audio first) just
         # times out here and the call proceeds exactly as before.
-        async def receive_initial_metadata() -> dict[str, Any]:
+        #
+        # Returned raw rather than filtered to bidi_call_metadata, because this
+        # same frame is also how a human agent's portal identifies itself (see
+        # voice_chat) — a filter here would swallow that and leave the portal
+        # waiting forever for a call it never announced.
+        async def receive_first_message() -> dict[str, Any]:
             try:
                 message = await asyncio.wait_for(websocket.receive_json(), timeout=3.0)
             except Exception:
                 return {}
-            return message if isinstance(message, dict) and message.get("type") == "bidi_call_metadata" else {}
+            return message if isinstance(message, dict) else {}
 
-        metadata_task = asyncio.create_task(receive_initial_metadata())
+        first_message_task = asyncio.create_task(receive_first_message())
+
+        # Awaited before the gateway and prompt loads, not after: those are
+        # already in flight and keep loading regardless, and a portal
+        # connection has no use for either — making it wait on them would add a
+        # gateway round trip to every join for nothing.
+        first_message = await first_message_task
+        if handoff.is_portal_attach(first_message):
+            handed_to_portal = True
+            # Neither is needed now, and both hold a connection open.
+            tools_task.cancel()
+            prompt_task.cancel()
+            # This connection was never a call. Left registered, the
+            # placeholder above would show up on /portal/queue as a live call
+            # with no caller, and _prune_calls would never collect it — it only
+            # expires calls that have ENDED, which this one never will.
+            handoff.unregister_call(live_call)
+            return first_message
+
+        initial_metadata = (
+            first_message if first_message.get("type") == "bidi_call_metadata" else {}
+        )
+
+        # Which AgentCore Runtime session this call arrived on. A human agent
+        # joining later has to presign with this exact value to be routed to
+        # this container, so it goes onto the escalations row at escalation
+        # time (see handoff._persist_portal_keys) — nothing else in the system
+        # can discover it.
+        #
+        # Two sources because neither is guaranteed: Runtime may forward its
+        # own session header through the WebSocket handshake, and the caller's
+        # page can read the id out of the presigned URL it was handed. The
+        # header wins when it's there, since it's the platform's own view of
+        # the routing rather than a client's claim about it.
+        runtime_session_id = websocket.headers.get(
+            "x-amzn-bedrock-agentcore-runtime-session-id") or ""
+        if not runtime_session_id:
+            claimed = initial_metadata.get("runtime_session_id")
+            if isinstance(claimed, str) and _RUNTIME_SESSION_ID_PATTERN.match(claimed.strip()):
+                runtime_session_id = claimed.strip()
+        live_call.runtime_session_id = runtime_session_id or None
+        print(f"[handoff] call {live_call.call_id} runtime session: " + (
+            runtime_session_id or "unknown — a portal hosted off this container will be "
+                                  "able to read this call but not join it"))
 
         tools = await tools_task
         system_prompt = await prompt_task
@@ -1597,7 +1685,6 @@ async def voice_chat(websocket: WebSocket) -> None:
         # (including an attempted prompt injection typed into the field —
         # this reaches the model as literal text below) is dropped, and the
         # call proceeds exactly as if no number had been provided.
-        initial_metadata = await metadata_task
         raw_mobile_number = initial_metadata.get("mobile_number")
         mobile_number = (
             raw_mobile_number.strip()
@@ -1824,29 +1911,56 @@ async def voice_chat(websocket: WebSocket) -> None:
 
         traceback.print_exc()
     finally:
-        # Tell any open portal the caller has gone, and keep the call readable
-        # there for a while (handoff.RETENTION_SECONDS) so a human following a
-        # Slack link a few minutes late still sees the conversation.
-        try:
-            await live_call.mark_ended()
-        except Exception as cleanup_error:
-            print(f"[handoff] error ending call {live_call.call_id}: {cleanup_error}")
-        # No explicit memory write here: the session manager persists each turn
-        # as it happens, so a call that drops mid-sentence keeps everything said
-        # up to that point rather than losing it all at teardown.
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-        if voice_agent is not None:
+        # Deliberately no `return` anywhere in this block: a return in a
+        # `finally` replaces whatever the `try` was returning, which here would
+        # silently discard the portal attach frame and drop the join.
+        #
+        # A connection handed on to the portal bridge is only just beginning:
+        # the socket belongs to serve_portal_socket now, and the call it's
+        # joining belongs to a different connection entirely. Ending that call
+        # or closing that socket is exactly what must not happen — so the
+        # caller teardown is skipped wholesale, and only the gateway client,
+        # which really was this function's, is cleaned up.
+        if handed_to_portal:
+            # These two were started before the first frame revealed this
+            # wasn't a call at all — the ordering that keeps a real caller's
+            # gateway round trip off their critical path. Nobody wants their
+            # results now.
+            #
+            # stop() is deliberately documented as safe on a partly-started
+            # client, but it joins a background thread, and a human agent is
+            # waiting on this socket to become their call — so it goes to a
+            # worker thread with a deadline rather than blocking the event
+            # loop for however long that join takes.
             try:
-                await voice_agent.stop()
+                await asyncio.wait_for(
+                    asyncio.to_thread(mcp_client.stop, None, None, None), timeout=5)
             except Exception as cleanup_error:
-                print(f"Error stopping voice agent: {cleanup_error}")
-        try:
-            mcp_client.stop(None, None, None)
-        except Exception as cleanup_error:
-            print(f"Error closing gateway connection: {cleanup_error}")
+                print(f"Error closing gateway connection: {cleanup_error}")
+        else:
+            # Tell any open portal the caller has gone, and keep the call readable
+            # there for a while (handoff.RETENTION_SECONDS) so a human following a
+            # Slack link a few minutes late still sees the conversation.
+            try:
+                await live_call.mark_ended()
+            except Exception as cleanup_error:
+                print(f"[handoff] error ending call {live_call.call_id}: {cleanup_error}")
+            # No explicit memory write here: the session manager persists each turn
+            # as it happens, so a call that drops mid-sentence keeps everything said
+            # up to that point rather than losing it all at teardown.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            if voice_agent is not None:
+                try:
+                    await voice_agent.stop()
+                except Exception as cleanup_error:
+                    print(f"Error stopping voice agent: {cleanup_error}")
+            try:
+                mcp_client.stop(None, None, None)
+            except Exception as cleanup_error:
+                print(f"Error closing gateway connection: {cleanup_error}")
 
 
 if __name__ == "__main__":

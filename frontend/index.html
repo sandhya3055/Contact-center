@@ -1357,6 +1357,17 @@ async function start() {
       ({ url } = await res.json());
     }
 
+    // Whoever presigned that URL put the Runtime session id in it. Read back
+    // out here rather than generated on this side, so it's the same value
+    // AgentCore is actually routing on — see the metadata message below.
+    let runtimeSessionId = '';
+    try {
+      runtimeSessionId = new URL(url).searchParams
+        .get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id') || '';
+    } catch (err) {
+      console.warn('[ava] could not read the session id out of the call URL', err);
+    }
+
     ws = new WebSocket(url);
 
     ws.onopen = async () => {
@@ -1366,9 +1377,21 @@ async function start() {
       setCallUiState(true);
       // Sent before anything else so the backend can use it to skip asking
       // for the mobile number verbally — see agentcore_app/strands_agent.py.
-      if (mobileNumber) {
-        ws.send(JSON.stringify({ type: 'bidi_call_metadata', mobile_number: mobileNumber }));
-      }
+      //
+      // The session id rides along because of what happens if this call is
+      // escalated: AgentCore Runtime routes a connection to an instance by
+      // session id and publishes no other path, so it is the only thing that
+      // can put a human agent's browser in the same container as this call.
+      // The agent process can't discover it on its own — nothing tells the
+      // container which session it was reached on unless Runtime forwards the
+      // header — but it's right here in the URL we were handed, so this
+      // reports it. Absent for a direct ws:// endpoint (a local run), where
+      // the portal reaches the agent by origin and needs no routing hint.
+      ws.send(JSON.stringify({
+        type: 'bidi_call_metadata',
+        ...(mobileNumber ? { mobile_number: mobileNumber } : {}),
+        ...(runtimeSessionId ? { runtime_session_id: runtimeSessionId } : {}),
+      }));
       addSystemLine('Connected — speak into your microphone.');
       try {
         await startMic();

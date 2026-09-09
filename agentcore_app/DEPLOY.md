@@ -317,10 +317,22 @@ Open `frontend/index.html` (double-click it, or serve it from any static
 host), paste the Function URL from step 4 into the endpoint field, and
 click **Talk to Ava**.
 
-## 6. The agent portal's records (Lambda + IAM)
+## 6. The agent portal's records and its way into a call (Lambda + IAM)
 
 Needed only if the portal is hosted off the container (Amplify). See the
 README's Amplify section for why the portal has two independent sources.
+
+This one Lambda covers both of the portal's needs, because both start from the
+same check — the per-escalation token's hash on the escalations row:
+
+- **the records** (the reason, the queue row, the conversation) it serves
+  itself, from DynamoDB and AgentCore Memory;
+- **a way into the live call** it can't serve, but it can sign one: a presigned
+  WebSocket URL onto the agent runtime, for the Runtime session the caller's own
+  connection arrived on. Session id is what AgentCore routes on, so that URL is
+  what puts the human agent's browser in the container holding the call. Set
+  `AGENT_RUNTIME_ARN` to enable it; leave it unset and the portal is read-only
+  and says so on the page.
 
 **The Lambda.** `lambda/portal_context.py` is a symlink to the container's copy
 and `zip -r` follows it, so there's one file to keep correct:
@@ -336,21 +348,44 @@ aws lambda create-function --function-name ava-portal-context \
   --runtime python3.12 --handler portal_context_handler.handler \
   --role arn:aws:iam::<account>:role/ava-portal-context-lambda-role \
   --zip-file fileb://portal_context.zip --timeout 20 --memory-size 512 \
-  --environment 'Variables={ESCALATIONS_TABLE=escalations,MEMORY_ID=<memory-id>}' \
+  --environment 'Variables={ESCALATIONS_TABLE=escalations,MEMORY_ID=<memory-id>,\
+AGENT_RUNTIME_ARN=<runtime-arn>,ALLOWED_ORIGIN=https://<portal-origin>}' \
   --region us-west-2
 ```
 
+Set `ALLOWED_ORIGIN` rather than leaving it at `*`: this endpoint now hands out
+a credential, not just a transcript.
+
 Its role needs `AWSLambdaBasicExecutionRole` plus `dynamodb:GetItem` on the
-escalations table and `bedrock-agentcore:ListEvents` on the memory resource
-(and the memory ARN with `/*`).
+escalations table, `bedrock-agentcore:ListEvents` on the memory resource (and
+the memory ARN with `/*`), and — only for the join URL —
+`bedrock-agentcore:InvokeAgentRuntime` on the runtime:
+
+```json
+{"Sid":"PresignAJoinOntoTheAgentRuntime","Effect":"Allow",
+ "Action":"bedrock-agentcore:InvokeAgentRuntime",
+ "Resource":["arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>",
+             "arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>/*"]}
+```
+
+Without it the records still work; the portal shows why Join is unavailable.
 
 **A front door.** A public Lambda Function URL is the obvious choice and may be
 blocked: an org guardrail can make one 403 at request time even with a correct
 `Principal: "*"` policy and `AuthType: NONE`. Test with `curl` before believing
 it works. If it 403s, front the function with an API Gateway HTTP API — a
-Lambda proxy integration on `ANY /`, `$default` stage with auto-deploy. Leave
-the API's own CORS config empty: the handler emits those headers, and two sets
-make browsers reject the response. `PORTAL_CONTEXT_URL` is then the invoke URL.
+Lambda proxy integration on `ANY /`, `$default` stage with auto-deploy, and
+configure CORS **on the API**:
+
+```bash
+aws apigatewayv2 update-api --api-id <id> --region us-west-2 \
+  --cors-configuration AllowOrigins=https://<portal-origin>,AllowMethods=GET,OPTIONS,AllowHeaders=content-type
+```
+
+An HTTP API strips `Access-Control-*` out of an integration's response, so the
+handler's own headers never reach the browser and the fetch fails as a CORS
+error with the Lambda returning 200. `PORTAL_CONTEXT_URL` is then the invoke
+URL.
 
 **The agent's role** needs two additions for any of this to work, and the
 second one is what makes AgentCore Memory work at all:
@@ -366,10 +401,26 @@ second one is what makes AgentCore Memory work at all:
 ```
 
 `UpdateItem` is how the agent stamps a call's portal keys onto the escalations
-row (the memory session to read, and a hash of the portal token) so a portal
-outside the container can find and authorize the call. Without it everything
-else still works and only that hosted portal can't resolve a call — one log
-line per escalation says so.
+row — the memory session to read, a hash of the portal token, and the Runtime
+session id a join has to be signed for — so a portal outside the container can
+find, authorize and reach the call. Without it everything else still works and
+only that hosted portal can't resolve a call — one log line per escalation says
+so.
+
+**Joining a Runtime-hosted call.** Runtime publishes one WebSocket path per
+container (`/ws`) and picks the instance from the session id in the signed URL,
+so there is no URL that could address the portal's own route. The portal
+therefore presigns `/ws` with the *caller's* session id and names the call in
+its first frame (`{"type":"portal_attach","call":…,"token":…}`); the agent
+branches on that frame and hands the connection to the same bridge the direct
+route uses. Nothing to configure — but two things have to be true, and both are
+reported in the container's log per call:
+
+- the caller's page must report its session id, which it reads out of the
+  presigned URL it was handed (`frontend/index.html`). A container that logs
+  `runtime session: unknown` will serve records and refuse joins.
+- the escalations row must carry `portalRuntimeSessionId`, which needs the
+  `UpdateItem` above.
 
 ## Local testing before any of this
 
