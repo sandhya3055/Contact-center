@@ -161,18 +161,393 @@ browser ── connects directly with that URL ──> agentcore_app/strands_age
   execution role needs `bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream`
   on that ARN. Package `bedrock-agentcore` (see `lambda/requirements.txt`)
   into the deployment zip or a layer — it isn't in the base Lambda runtime.
-- **`frontend/index.html`** — a single self-contained page: enter your
-  caller mobile number (optional — lets Ava skip asking for it out loud;
-  sent as one `{"type": "bidi_call_metadata", ...}` message right after the
-  socket opens, see `strands_agent.py`) and, under **Connection settings**,
-  your Lambda's endpoint URL (Function URL or API Gateway) or a direct
-  `ws://`/`wss://` URL for local testing. Click **Talk to Ava** and it
-  fetches the presigned URL (skipped for a `ws://`/`wss://` endpoint — see
-  below), opens the WebSocket, streams mic audio as base64 PCM16/16kHz
-  (`{"type": "bidi_audio_input", ...}`), plays back Ava's audio
-  (`{"type": "bidi_audio_stream", ...}`), and shows a live, fixed-height
-  scrollable transcript. No build step — open it directly, or serve it from
-  anywhere static.
+- **`agentcore_app/handoff.py` + `portal.html`** — the human handoff: an
+  escalation posts to Slack with a link to an agent portal, where a person
+  reads the conversation and joins the live call, taking Ava off the line.
+  See **Human handoff** below.
+- **`frontend/index.html`** — a single self-contained page: a customer-facing
+  support site (hero, what Ava can do, how it works, FAQ) whose every
+  **Call Ava** button — nav, hero dial pad, closing CTA, and the floating
+  button that follows you down the page — opens the same call panel. The panel
+  asks for one thing before the call: your registered mobile number, sent as a
+  `{"type": "bidi_call_metadata", ...}` message right after the socket opens.
+  That's what lets Ava look your policy up *before* she speaks and open with
+  your name (see the opening sequence below), so unlike previous versions it's
+  required, not optional. Where the call goes isn't asked at all — it comes
+  from `CALL_ENDPOINT` in `.env` via `frontend/config.js` (see
+  **Configuring the endpoint**). Hit **Call
+  Ava** and it fetches the presigned URL (skipped for a `ws://`/`wss://`
+  endpoint — see below), opens the WebSocket, streams mic audio as base64
+  PCM16/16kHz (`{"type": "bidi_audio_input", ...}`), and plays back Ava's
+  audio (`{"type": "bidi_audio_stream", ...}`). During the call you get a
+  live scrollable transcript, a call timer, an avatar that pulses with Ava's
+  speech and a level meter for your own mic (both fed by `AnalyserNode`s),
+  plus two controls: **Mute** — which drops captured audio instead of sending
+  it, so nothing recorded while muted is flushed on unmute — and **End call**.
+  No build step — open it directly, or serve it from anywhere static.
+
+### Configuring the endpoint
+
+The page has no connection-settings UI: which endpoint a call goes to is
+deployment config, not something a caller should type in. It lives in `.env`
+with everything else:
+
+```bash
+# .env — a presign Lambda Function URL when deployed, or this when running
+# strands_agent.py locally:
+CALL_ENDPOINT=ws://127.0.0.1:8080/ws
+```
+
+`index.html` is opened straight from disk, and a `file://` page can't read
+`.env` (or `fetch()` anything beside it), so one small generator bridges the
+gap — run it after any change to `CALL_ENDPOINT`:
+
+```bash
+python frontend/make_config.py   # writes frontend/config.js from .env
+```
+
+That writes `window.AVA_CONFIG.callEndpoint` into `frontend/config.js`, which
+the page loads. `config.js` is generated and gitignored; until it exists the
+call button is disabled and the panel says which command to run.
+
+### The opening sequence (lookup, then greet by name)
+
+With a mobile number entered, Ava's first action on a call isn't speech — it's
+the gateway's policy lookup for that number. Only once the result is back does
+she speak, opening with the caller's first name from the policy and
+introducing herself in the same breath ("Hello Priya, I'm Ava, your AI
+Assistant. I can help with…"), then handling whatever they need.
+
+Two details worth knowing if you change this:
+
+- It's appended to the **system prompt** per call (`strands_agent.py`, right
+  after the mobile number is resolved), not to the kickoff text. The base
+  prompt scripts an exact opening line, and a user-role nudge doesn't reliably
+  beat that — system-level text saying which of the two openings applies does.
+  It also means this keeps working when the prompt comes from Bedrock Prompt
+  Management (`BEDROCK_PROMPT_ID`), with no console edit needed to match.
+- No tool is named in it, in keeping with the rest of this project: the
+  addendum describes the lookup by what it does and lets the model pick from
+  whatever the gateway currently exposes.
+
+If the lookup finds no policy, or no usable name, Ava opens with the same line
+minus the name — she never guesses one. A caller without a number never
+reaches this path at all (the UI requires one), but the backend still handles
+it the old way if a different client connects without metadata.
+
+### Human handoff (Slack → agent portal → live call)
+
+When Ava escalates, a person can take over the call she's already on — the
+caller stays on the same line and just starts hearing a human instead.
+
+```
+Ava escalates ──> Slack message (reason, summary, last lines, link)
+                      │  human clicks
+                      ▼
+              /portal?call=…&token=…    ← full transcript + escalation reason
+                      │  Join call
+                      ▼
+  caller browser <── audio ──> /ws <── audio ──> /portal/ws <── audio ──> human browser
+                                 │
+                                 └─ Nova Sonic left running but starved of input
+```
+
+- **`agentcore_app/handoff.py`** — the whole handoff: the per-call registry,
+  the Slack post, and the portal's routes (`/portal`, `/portal/api/call/{id}`,
+  `/portal/ws/{id}`), mounted on the same FastAPI app that serves `/ws`.
+- **`agentcore_app/portal.html`** — the agent console. Opens on one call:
+  why it escalated, Ava's summary, every field the escalate tool was called
+  with, and the conversation so far, still updating live. The human **hears
+  the call from the moment they open the link** — listening before taking over
+  is the point — and **Join call** puts them through, with mute and leave.
+
+  Two panels read the durable records rather than trusting only what this
+  process is holding, both fetched after the page opens (so neither delays it)
+  and re-fetchable with **Refresh**:
+
+  - **Conversation** comes from **AgentCore Memory** (short-term/session) —
+    the turns the agent itself persisted, keyed by the same actor id and
+    session id `strands_agent.py` writes under. Memory is written
+    asynchronously, so the newest turn or two usually isn't there yet: those
+    come from the live stream and are tagged `live`, and the panel's header
+    says which store it's showing. Memory unset or unreadable degrades to the
+    live stream with a note, never an error page.
+  - **Escalation record** is the row the gateway's escalate tool wrote to the
+    **`escalations` DynamoDB table** (`ESCALATIONS_TABLE`), fetched by
+    `escalationId` — status, `queueKey` priority, `createdAt`, TTL, captured
+    slots, `assignedAgentId`. That's what the rest of the contact centre acts
+    on, and it's rendered from whatever keys the row actually has, so a schema
+    change on the table side needs no change here.
+- **`_EscalationNotifierTool`** in `strands_agent.py` is what notices. Like
+  every other wrapper there it hardcodes no tool name: a successful result
+  carrying an escalation id *is* an escalation. Slack is posted from a
+  background task, so the caller isn't left in silence waiting on an HTTP
+  round trip.
+
+> **Writing an `AgentTool` wrapper: act on the result *inside* the loop.**
+> Strands' tool executor `return`s as soon as it sees a `ToolResultEvent`
+> (`strands/tools/executors/_executor.py`), which abandons the wrapper's async
+> generator — so anything written after the `async for` never runs. It fails
+> silently: the tool still works, the model still gets its result, and only
+> the wrapper's own effect goes missing. Every wrapper here therefore does its
+> work on the `ToolResultEvent` before yielding it.
+
+**Taking Ava off the line** is two functions in `voice_chat`, not a mode flag
+threaded through the app: `run()` pulls the caller's events in through one and
+pushes Ava's out through the other, so while a human is on the call the first
+sends the caller's audio to the portal instead of the model, and the second
+drops Ava's audio and transcript. Nova Sonic keeps running rather than being
+stopped — stopping it would end `run()`, which would end the call the human
+just joined. When the human leaves, the call goes back to Ava rather than to
+dead air.
+
+**It is fed silence, not nothing** (`KEEPALIVE_SECONDS`). Nova Sonic ends a
+session after ~55s without audio, with `Timed out waiting for audio bytes or
+interactive content`, and that exception ends `run()` and drops the caller
+mid-call. Three ordinary things stop the audio: a human taking over, the
+caller pressing mute (the browser then sends nothing at all), and the caller's
+tab going to the background, where the throttled main thread stops flushing
+mic frames — which is easy to trigger by opening the portal link in another
+tab of the same browser. So whenever no real caller audio is arriving, a 100ms
+frame of silence goes in its place: exactly what a live mic sends in a quiet
+room. The receive task is held across those timeouts rather than re-created,
+so a caller message arriving as one expires isn't lost.
+
+Configure it in `.env` (all optional — with no Slack token the portal link is
+printed to the server log instead, which is enough to work locally):
+
+```bash
+SLACK_BOT_TOKEN=xoxb-…                            # needs chat:write
+SLACK_ESCALATION_CHANNEL=#contact-center-escalations
+PORTAL_BASE_URL=http://127.0.0.1:8080             # origin the Slack link points at
+HANDOFF_RETENTION_SECONDS=1800                    # how long an ended call stays readable
+HANDOFF_ADMIN_TOKEN=                              # unset = /portal/queue disabled
+ESCALATIONS_TABLE=escalations                     # the queue table the portal reads
+# MEMORY_ID / MEMORY_REGION are the same ones the agent already uses.
+```
+
+**Where the link is.** An escalation puts it in two places: the Slack message,
+and one line on the agent's stdout —
+
+```
+[handoff] escalation on call 7d3e9486460e — portal: http://127.0.0.1:8080/portal?call=…&token=…
+```
+
+Lose both and the call is unreachable, because the token can't be
+reconstructed. So set `HANDOFF_ADMIN_TOKEN` to any secret string and
+`/portal/queue?token=<that>` lists this instance's calls with a link into
+each escalated one. It's off unless that variable is set — the page shows
+every call's bearer token at once, which is strictly more exposure than a
+single link.
+
+Two limits to know before this fronts real callers:
+
+- **Access is one per-escalation token**, minted when the call escalates and
+  sent only to Slack. Both portal endpoints require it, and an unauthorized
+  socket is refused before it's accepted. But anyone holding that Slack
+  message — or the URL after someone forwards it — can listen to and speak
+  with the caller. A real deployment wants an identity check in front of
+  `/portal`.
+- **State is in this process's memory**, which is the honest scope: one
+  container. A portal link only resolves on the instance holding that call, so
+  more than one instance behind the same endpoint needs sticky routing to it
+  (or this state moved somewhere shared, with a relay both instances reach).
+  Ended calls are kept `HANDOFF_RETENTION_SECONDS` so a late click still shows
+  the conversation, then dropped; AgentCore Memory remains the durable record.
+- **On AgentCore Runtime the portal needs its own way in.** Callers reach the
+  runtime through `InvokeAgentRuntimeWithWebSocketStream` (a signed WebSocket
+  invocation), not as an ordinary HTTP origin — so a plain `https://…/portal`
+  GET isn't served by that path at all. The escalation reason, the queue row
+  and the conversation don't need the container (see the Amplify section:
+  [`lambda/portal_context_handler.py`](lambda/portal_context_handler.py) reads
+  them from DynamoDB and AgentCore Memory), but **joining the live call does**,
+  because the caller's socket is an object in that process's memory. For that,
+  `PORTAL_BASE_URL` has to point at something that routes to the container: an
+  ALB in front of port 8080, or a tunnel while developing. Locally, where
+  `strands_agent.py` is just a uvicorn server, `http://127.0.0.1:8080` works
+  as-is.
+
+### Hosting the pages on AWS Amplify
+
+[`amplify.yml`](amplify.yml) at the repo root builds both pages. There's no
+build tooling — the only step is writing the `config.js` each page reads,
+which `.env` supplies locally and Amplify environment variables supply here.
+
+**Customer page** — set one variable and deploy:
+
+```
+CALL_ENDPOINT = https://<presign-lambda-url>/       # or wss://<...>
+```
+
+It must be `https://` or `wss://`: an Amplify page is served over HTTPS, and a
+secure page can't open a `ws://` socket or `fetch` over `http://` — the
+browser blocks it as mixed content and the call silently fails to connect. The
+build fails early on a `ws://localhost` value rather than shipping a dead call
+button. The presign Lambda also needs CORS for the Amplify origin, since the
+page fetches it cross-origin. (Serving over HTTPS has a side benefit: it's a
+secure context, so the microphone works — a `file://` page can't load the
+AudioWorklet module in current Chrome.)
+
+**Agent portal** — the portal needs two unrelated things, and only one of them
+needs the agent container. Sorting that out is what makes it hostable at all:
+
+| What the page shows | Where it comes from | Needs the container? |
+| --- | --- | --- |
+| Escalation reason, queue row, conversation | the escalations table + AgentCore Memory | **No** |
+| Live call state and the audio bridge (Join) | the process holding the caller's socket | **Yes** |
+
+The second row is the awkward one on AgentCore Runtime, because that container
+has no browser-reachable origin: Runtime publishes one WebSocket path per
+container behind a SigV4-signed endpoint, and picks the instance from the
+session id in the signed URL. There is no host a portal could point at.
+
+So the portal doesn't try. It asks the portal-context Lambda for a **presigned
+socket onto the caller's own Runtime session** — the session id being exactly
+what routes it into the container holding that call — and then names the call in
+its first frame instead of in a URL path. Same bridge on the other side of that
+handshake; see [Joining a Runtime-hosted call](#joining-a-runtime-hosted-call).
+
+That makes `PORTAL_CONTEXT_URL` alone enough for a fully working portal, join
+included. `PORTAL_API_BASE` remains for the case where the agent *does* have a
+reachable origin (a local run, or ECS behind an ALB), and is then used directly:
+
+```
+# Amplify — one of these is enough
+PORTAL_CONTEXT_URL     = https://<portal-context-lambda-url>   # records + a way in
+PORTAL_API_BASE        = https://<agent-origin>                # only if the agent has one
+# agent
+PORTAL_ALLOWED_ORIGINS = https://<amplify-domain>      # CORS + WS origin check
+PORTAL_BASE_URL        = https://<amplify-domain>      # so Slack links point here
+```
+
+With both unset the portal is skipped entirely, which is right when the agent
+serves it itself at `GET /portal`. With either set, the page ships as
+`dist/portal/index.html`, so the `/portal` path the Slack link already builds
+resolves with no Amplify rewrite rule to maintain.
+
+#### `PORTAL_CONTEXT_URL` — the records, and a way into the call
+
+[`lambda/portal_context_handler.py`](lambda/portal_context_handler.py) behind a
+Function URL. It reads the escalations row and AgentCore Memory directly, so it
+answers whether or not a container is still holding the call — which also means
+the portal keeps working after the call ends, where the agent's own registry
+drops it after `HANDOFF_RETENTION_SECONDS`.
+
+It also mints the presigned WebSocket URL the page joins with, when
+`AGENT_RUNTIME_ARN` is set. Both jobs start from the same check, which is why
+they're one endpoint rather than two.
+
+It shares
+[`agentcore_app/portal_context.py`](agentcore_app/portal_context.py) with the
+container verbatim (`lambda/portal_context.py` is a symlink) so both parse
+memory events the same way. Deploy it with:
+
+```
+ESCALATIONS_TABLE = escalations                    # same table the escalate tool writes
+MEMORY_ID         = <the agent's memory id>
+AGENT_RUNTIME_ARN = <the agent runtime's ARN>      # omit for a read-only portal
+ALLOWED_ORIGIN    = https://<amplify-domain>       # defaults to "*"
+```
+
+Set `ALLOWED_ORIGIN`: with `AGENT_RUNTIME_ARN` configured this endpoint hands
+out a credential, not just a transcript.
+
+and an execution role with `dynamodb:GetItem` on the table,
+`bedrock-agentcore:ListEvents` on the memory resource, and
+`bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` on the runtime — that
+last one only for the join URL, and specifically **not** `InvokeAgentRuntime`,
+which covers `/invocations` and leaves a presigned `/ws` refused with a bare
+`HTTP 403` at the handshake. Without it the records still work and the page says
+why Join is unavailable. Package
+`boto3>=1.40` with it (`lambda/portal_context_requirements.txt`) — the
+runtime's bundled copy generally doesn't know the `bedrock-agentcore` client,
+and without it the row still loads while the conversation comes back as a note.
+
+Authorization is the same per-escalation token from the Slack link, and the
+Lambda shares no secret with the container to check it: when a call escalates,
+the agent stamps `sha256(token)` onto the escalations row along with the memory
+session to read and the call's start time, and the Lambda compares against that
+hash. So a leaked table row grants nothing, and the agent needs
+**`dynamodb:UpdateItem`** on the table for the stamp (without it everything
+else still works and only this hosted portal can't resolve the call — the log
+says so, once per escalation).
+
+#### `PORTAL_API_BASE` — the live call
+
+Scheme + host (+ port) only, no path: the page appends `/portal/api/...` and
+`/portal/ws/...` itself. It must be the origin of the `strands_agent.py`
+process itself. What it can be:
+
+| Where the agent runs | value |
+| --- | --- |
+| Your machine, through a tunnel (ngrok, Cloudflare Tunnel) | `https://a1b2c3.ngrok-free.app` |
+| A container (ECS/Fargate/EC2) behind an **ALB** with an ACM cert | `https://agent.yourdomain.com` |
+| CloudFront in front of that ALB | `https://agent.yourdomain.com` |
+
+Not usable: `http://127.0.0.1:8080` (an HTTPS page can't call `http://` or
+`ws://` — mixed content), a raw `*.elb.amazonaws.com` name (no cert), the
+AgentCore Runtime ARN (a signed invocation, not an HTTP origin), or — the easy
+mistake — **the presign API Gateway from `CALL_ENDPOINT`**. That one answers
+every path with `{"url": …}` and permissive CORS, so the page's snapshot fetch
+appears to succeed and used to render a call with "Invalid Date" and an empty
+transcript. The page now validates the shape and names the misconfiguration
+instead.
+
+**An ALB, specifically** — not API Gateway. Its HTTP APIs don't proxy
+WebSocket connections, and its WebSocket APIs use a route plus `@connections`
+model rather than a transparent proxy, so the audio bridge would have to be
+rewritten around it. An ALB passes WebSockets straight through.
+
+With `PORTAL_CONTEXT_URL` set and the agent unreachable, the page renders the
+records and disables Join with the reason, rather than failing whole — the
+commonest cause is benign (the call ended and the agent released it).
+
+#### Joining a Runtime-hosted call
+
+Nothing to configure beyond `AGENT_RUNTIME_ARN` above, but it's worth knowing
+what happens, because the shape is unusual and it's the only shape that can
+work on Runtime:
+
+```
+portal page ──fetch──► portal-context Lambda   (checks sha256(token) on the row,
+                                                reads portalRuntimeSessionId,
+                                                signs a wss:// for that session)
+            ──wss────► AgentCore Runtime ──► the container holding the call
+            ──frame──► {"type":"portal_attach","call":…,"token":…}
+```
+
+The agent's `/ws` branches on that first frame: a caller starts a voice call, a
+`portal_attach` becomes a portal bridge — the same one `/portal/ws/{call_id}`
+serves for a directly reachable agent, so joining behaves identically either
+way. Runtime accepts the handshake before the container has looked the call up,
+so an open socket proves nothing; the page treats the first `call_state` as the
+proof and otherwise says the call couldn't be found.
+
+Two things have to be true, and the container's log says so once per call:
+
+- **the container knows the Runtime session id.** Runtime forwards it on the
+  handshake as `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, and that's what
+  is used; the caller's page also reports it, read out of the presigned URL it
+  was handed, as a fallback. A call that logs `runtime session: unknown` will
+  serve records and refuse joins.
+- **the escalations row carries `portalRuntimeSessionId`**, which needs the
+  agent role's `dynamodb:UpdateItem`.
+
+The URL is a real credential while it lives: scoped to one session id, expiring
+(`JOIN_URL_TTL_SECONDS`, default 15 minutes), minted only after the token check
+passes, and never logged.
+
+There is deliberately no `Origin` check on the agent's side of this path, and
+adding one would break every join: Runtime terminates the browser's WebSocket
+and opens its own to the container, carrying its own origin
+(`https://cell01.<region>.prod.arp.kepler-analytics.aws.dev`). The browser's
+origin is never visible there. `PORTAL_ALLOWED_ORIGINS` still applies to the
+direct `/portal/ws/{call_id}` route, where the header really is the browser's.
+
+And once the portal is internet-facing, put real authentication in front of it
+(Amplify access control, Cognito, or an authenticated ALB rule); the
+per-escalation token is a reasonable gate on localhost and a thin one on the
+public internet.
 
 ### Run it locally (no AWS deploy needed)
 
@@ -187,27 +562,31 @@ pip install -r requirements.txt
 python strands_agent.py
 ```
 
-Then open `frontend/index.html` directly in a browser (double-click it, or
-`open frontend/index.html`) and, under **Connection settings**, set the
-endpoint field to:
+Point the page at it and open it:
+
+```bash
+# in .env: CALL_ENDPOINT=ws://127.0.0.1:8080/ws
+python frontend/make_config.py
+open frontend/index.html
 ```
-ws://127.0.0.1:8080/ws
-```
+
 The frontend detects a `ws://`/`wss://` endpoint and connects to it
 directly instead of treating it as a presign Lambda to `fetch()` first.
-Click **Talk to Ava**.
+Enter your registered mobile number and click **Call Ava** (any call button
+on the page opens the call panel).
 
 ### Run it after deploying
 
 Once `agentcore_app/DEPLOY.md`'s steps are done, you'll have an Agent
 Runtime ARN and a Lambda Function URL in front of it:
 
-1. Open `frontend/index.html` (same file, no separate build/hosting step
-   required — or serve it from S3/CloudFront/any static host).
-2. Under **Connection settings**, set the endpoint field to your Lambda's
-   Function URL (or API Gateway URL) — the one whose only job is minting a
-   presigned WebSocket URL for your runtime ARN.
-3. Optionally enter a caller mobile number, then click **Talk to Ava**.
+1. Set `CALL_ENDPOINT` in `.env` to your Lambda's Function URL (or API
+   Gateway URL) — the one whose only job is minting a presigned WebSocket URL
+   for your runtime ARN — then run `python frontend/make_config.py`.
+2. Open `frontend/index.html` (same file, no separate build/hosting step
+   required — or serve it, plus the generated `config.js`, from
+   S3/CloudFront/any static host).
+3. Enter the caller's registered mobile number, then click **Call Ava**.
 
 **Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
 Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**

@@ -125,9 +125,23 @@ aws bedrock-agentcore-control create-agent-runtime \
     \"MCP_SERVER_URL\": \"$(grep ^MCP_SERVER_URL ../.env | cut -d= -f2-)\",
     \"AWS_REGION\": \"us-west-2\",
     \"BEDROCK_REGION\": \"us-east-1\",
-    \"MODEL_ID\": \"amazon.nova-2-sonic-v1:0\"
+    \"MODEL_ID\": \"amazon.nova-2-sonic-v1:0\",
+    \"MEMORY_ID\": \"$(grep ^MEMORY_ID ../.env | cut -d= -f2-)\",
+    \"ESCALATIONS_TABLE\": \"escalations\",
+    \"PORTAL_BASE_URL\": \"https://<portal-origin>\",
+    \"PORTAL_ALLOWED_ORIGINS\": \"https://<portal-origin>\"
   }"
 ```
+
+**`.env` is not in the container.** The Dockerfile copies only the `.py` and
+`.html` files, and `python-dotenv` finds nothing at runtime — so every setting
+the agent needs has to be listed here. This is worth stating plainly because
+the failure is silent and confusing: with `MEMORY_ID` missing the agent runs
+perfectly and simply never persists a conversation, so the portal's transcript
+is empty for reasons that look like a portal bug. Same for `SLACK_BOT_TOKEN`
+(escalations reach the log but never Slack) and `PORTAL_BASE_URL` (Slack links
+point at `http://127.0.0.1:8080`). Anything you set in `.env` for a local run,
+set here too, or accept that the deployed agent doesn't have it.
 
 `serverProtocol: HTTP` is correct here — per AWS's own reference sample,
 "HTTP includes both REST (`/invocations`) and WebSocket (`/ws`) endpoints."
@@ -149,9 +163,44 @@ You can re-check it any time with:
 aws bedrock-agentcore-control list-agent-runtimes --region us-west-2
 ```
 
-To redeploy after a code change: rebuild + push the image (step 1), then
-`aws bedrock-agentcore-control update-agent-runtime` with the same
-`--agent-runtime-artifact`.
+### Redeploying after a code change
+
+The runtime pins its image **by digest**, not by tag — `get-agent-runtime`
+shows `...ava-voice-agent@sha256:...`. So pushing over a tag deploys nothing;
+tag versions exist to identify a build, and the update call is what deploys it.
+Use a new version each time (`v9`, `v10`, … is the convention in this repo)
+rather than `latest`, so a rollback is a digest you can still name.
+
+```bash
+TAG=v13   # next unused version
+docker buildx build --platform linux/arm64 --provenance=false \
+  -t "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO:$TAG" --push .
+```
+
+`--provenance=false` matters: with attestations on, buildx pushes an image
+*index* and the tag's digest is the index's, not the arm64 manifest's. Then
+read the digest and update, passing the full spec — `update-agent-runtime`
+replaces rather than merges, so anything you omit (role, network, protocol,
+environment variables) is dropped:
+
+```bash
+DIGEST=$(aws ecr describe-images --repository-name "$REPO" --region "$REGION" \
+  --image-ids imageTag=$TAG --query 'imageDetails[0].imageDigest' --output text)
+```
+
+Then call `update-agent-runtime` with `containerUri` set to `<repo>@$DIGEST`
+plus the same `--role-arn`, `--network-configuration`,
+`--protocol-configuration` and `--environment-variables` the runtime already
+has (read them back with `get-agent-runtime` first). Poll `status` until
+`READY`, then confirm the container came up:
+
+```bash
+aws logs tail /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --region us-west-2 --since 5m --format short | grep -i "startup\|error\|memory\]"
+```
+
+`Application startup complete` plus `[memory] session manager ready` on the
+first call is what a good deploy looks like.
 
 ### Observability (tool calls in the trace)
 
@@ -267,6 +316,126 @@ aws lambda get-function-url-config --function-name ava-presigned-url --query Fun
 Open `frontend/index.html` (double-click it, or serve it from any static
 host), paste the Function URL from step 4 into the endpoint field, and
 click **Talk to Ava**.
+
+## 6. The agent portal's records and its way into a call (Lambda + IAM)
+
+Needed only if the portal is hosted off the container (Amplify). See the
+README's Amplify section for why the portal has two independent sources.
+
+This one Lambda covers both of the portal's needs, because both start from the
+same check — the per-escalation token's hash on the escalations row:
+
+- **the records** (the reason, the queue row, the conversation) it serves
+  itself, from DynamoDB and AgentCore Memory;
+- **a way into the live call** it can't serve, but it can sign one: a presigned
+  WebSocket URL onto the agent runtime, for the Runtime session the caller's own
+  connection arrived on. Session id is what AgentCore routes on, so that URL is
+  what puts the human agent's browser in the container holding the call. Set
+  `AGENT_RUNTIME_ARN` to enable it; leave it unset and the portal is read-only
+  and says so on the page.
+
+**The Lambda.** `lambda/portal_context.py` is a symlink to the container's copy
+and `zip -r` follows it, so there's one file to keep correct:
+
+```bash
+cd lambda
+rm -rf build && mkdir build
+python3.12 -m pip install --only-binary :all: -r portal_context_requirements.txt -t build
+cp portal_context_handler.py portal_context.py build/
+(cd build && find . -name '__pycache__' -type d -exec rm -rf {} + ; zip -qr ../portal_context.zip .)
+
+aws lambda create-function --function-name ava-portal-context \
+  --runtime python3.12 --handler portal_context_handler.handler \
+  --role arn:aws:iam::<account>:role/ava-portal-context-lambda-role \
+  --zip-file fileb://portal_context.zip --timeout 20 --memory-size 512 \
+  --environment 'Variables={ESCALATIONS_TABLE=escalations,MEMORY_ID=<memory-id>,\
+AGENT_RUNTIME_ARN=<runtime-arn>,ALLOWED_ORIGIN=https://<portal-origin>}' \
+  --region us-west-2
+```
+
+Set `ALLOWED_ORIGIN` rather than leaving it at `*`: this endpoint now hands out
+a credential, not just a transcript.
+
+Its role needs `AWSLambdaBasicExecutionRole` plus `dynamodb:GetItem` on the
+escalations table, `bedrock-agentcore:ListEvents` on the memory resource (and
+the memory ARN with `/*`), and — only for the join URL — this:
+
+```json
+{"Sid":"PresignAJoinOntoTheAgentRuntime","Effect":"Allow",
+ "Action":"bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
+ "Resource":["arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>",
+             "arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>/*"]}
+```
+
+**Not `InvokeAgentRuntime`.** That action authorizes `/invocations`; the
+WebSocket path is a separate action, and a URL presigned with only
+`InvokeAgentRuntime` is refused with a bare `HTTP 403` at the handshake — which
+reads as a signing problem, not a missing permission. Without the right grant
+the records still work and the portal shows why Join is unavailable.
+
+**A front door.** A public Lambda Function URL is the obvious choice and may be
+blocked: an org guardrail can make one 403 at request time even with a correct
+`Principal: "*"` policy and `AuthType: NONE`. Test with `curl` before believing
+it works. If it 403s, front the function with an API Gateway HTTP API — a
+Lambda proxy integration on `ANY /`, `$default` stage with auto-deploy, and
+configure CORS **on the API**:
+
+```bash
+aws apigatewayv2 update-api --api-id <id> --region us-west-2 \
+  --cors-configuration AllowOrigins=https://<portal-origin>,AllowMethods=GET,OPTIONS,AllowHeaders=content-type
+```
+
+An HTTP API strips `Access-Control-*` out of an integration's response, so the
+handler's own headers never reach the browser and the fetch fails as a CORS
+error with the Lambda returning 200. `PORTAL_CONTEXT_URL` is then the invoke
+URL.
+
+**The agent's role** needs two additions for any of this to work, and the
+second one is what makes AgentCore Memory work at all:
+
+```json
+{"Sid":"PortalEscalationRow","Effect":"Allow",
+ "Action":["dynamodb:GetItem","dynamodb:UpdateItem"],
+ "Resource":"arn:aws:dynamodb:<region>:<account>:table/escalations"},
+{"Sid":"AgentCoreMemorySession","Effect":"Allow",
+ "Action":["bedrock-agentcore:CreateEvent","bedrock-agentcore:ListEvents"],
+ "Resource":["arn:aws:bedrock-agentcore:<region>:<account>:memory/<memory-id>",
+             "arn:aws:bedrock-agentcore:<region>:<account>:memory/<memory-id>/*"]}
+```
+
+`UpdateItem` is how the agent stamps a call's portal keys onto the escalations
+row — the memory session to read, a hash of the portal token, and the Runtime
+session id a join has to be signed for — so a portal outside the container can
+find, authorize and reach the call. Without it everything else still works and
+only that hosted portal can't resolve a call — one log line per escalation says
+so.
+
+**Joining a Runtime-hosted call.** Runtime publishes one WebSocket path per
+container (`/ws`) and picks the instance from the session id in the signed URL,
+so there is no URL that could address the portal's own route. The portal
+therefore presigns `/ws` with the *caller's* session id and names the call in
+its first frame (`{"type":"portal_attach","call":…,"token":…}`); the agent
+branches on that frame and hands the connection to the same bridge the direct
+route uses. Nothing to configure — but two things have to be true, and both are
+reported in the container's log per call (`runtime session: …`, or `unknown`,
+which serves records and refuses joins):
+
+- the container has to learn the Runtime session id. Runtime forwards it on the
+  handshake as `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`, and that's the
+  source used — confirmed on the deployed runtime by a client that sent no
+  messages at all and was still logged with the right id. `frontend/index.html`
+  also reports it, read out of the presigned URL it was handed, as a fallback
+  for if that ever stops being true.
+- the escalations row must carry `portalRuntimeSessionId`, which needs the
+  `UpdateItem` above.
+
+One thing worth knowing before adding an origin check to that path: Runtime
+terminates the browser's WebSocket and opens its own to the container, carrying
+its own `Origin` (`https://cell01.<region>.prod.arp.kepler-analytics.aws.dev`).
+The browser's origin is never visible there, so checking it refuses every
+legitimate join and protects nothing. `PORTAL_ALLOWED_ORIGINS` still governs
+the direct `/portal/ws/{call_id}` route, where the header is the browser's;
+on this path the presigned URL, the token, and the Lambda's CORS are the gate.
 
 ## Local testing before any of this
 

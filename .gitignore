@@ -4,3 +4,6 @@ __pycache__/
 .venv/*
 venv/
 */.DS_Store
+lambda/build/
+# generated from .env by frontend/make_config.py
+frontend/config.js

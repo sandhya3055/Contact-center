@@ -48,6 +48,7 @@ Deploy: see DEPLOY.md.
 """
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -68,6 +69,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 # container, AgentCore Runtime injects environment variables directly and
 # there's no .env file present — load_dotenv() is then a harmless no-op.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+import handoff
+from handoff import LiveCall
 from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
 from strands.experimental.bidi import BidiAgent
 from strands.experimental.bidi.models import BidiNovaSonicModel
@@ -171,6 +174,51 @@ IDEMPOTENCY_WINDOW_SECONDS = 30
 HIGH_VALUE_CLAIM_FIELD = "estimated_cost"
 HIGH_VALUE_CLAIM_THRESHOLD = 100_000
 
+# Nova Sonic ends a session that goes ~55s without audio bytes or interactive
+# content ("Timed out waiting for audio bytes..."), and that exception ends
+# run() and with it the caller's call. So when no real caller audio is
+# arriving -- muted caller, human agent on the line, throttled background tab
+# -- silence is fed instead, well inside that window. Deliberately far below
+# 55s: this also has to cover a slow event loop and a stalled network.
+KEEPALIVE_SECONDS = 5.0
+_SILENT_FRAME_SAMPLES = INPUT_SAMPLE_RATE // 10  # 100ms, same as the browser sends
+
+
+def _silent_audio_event() -> dict[str, Any]:
+    """A 100ms frame of silence, shaped exactly like the browser's own audio
+    message — indistinguishable to the model from a live mic in a quiet room."""
+    return {
+        "type": "bidi_audio_input",
+        "audio": base64.b64encode(b"\x00" * (_SILENT_FRAME_SAMPLES * 2)).decode(),
+        "format": "pcm",
+        "sample_rate": INPUT_SAMPLE_RATE,
+        "channels": 1,
+    }
+
+
+def _normalize_caller_audio(message: dict[str, Any]) -> dict[str, Any]:
+    """Fill in the audio fields the model requires but a browser needn't know.
+
+    An audio frame from the page carries `audio` and `sample_rate` — the two
+    facts the page actually has. `format` and `channels` describe how this
+    agent captures audio, which is this process's business, not the client's.
+
+    Not cosmetic: BidiAudioInputEvent made both required, so a frame without
+    them raises TypeError inside send() — which ends run() and drops the call
+    the instant the caller first speaks, while Ava's greeting still plays
+    normally because that direction never touches this event. Filling them in
+    here keeps every already-deployed page working, and keeps the wire format
+    the page has to satisfy as small as it can be.
+    """
+    if message.get("type") != "bidi_audio_input":
+        return message
+    if "format" in message and "channels" in message:
+        return message
+    return {**message,
+             "format": message.get("format", "pcm"),
+             "sample_rate": message.get("sample_rate", INPUT_SAMPLE_RATE),
+             "channels": message.get("channels", 1)}
+
 
 SYSTEM_INSTRUCTION = """
 You are Ava, a voice assistant for a contact center. Every word you write is spoken aloud by a text-to-speech engine. There is no private channel — no reasoning, plans, notes, labels, field names, or raw tool output. Write only what a human agent would say.
@@ -256,6 +304,33 @@ async def get_system_prompt() -> str:
     except Exception as e:
         print(f"[prompt] failed to fetch {BEDROCK_PROMPT_ID!r} from Bedrock Prompt Management, falling back to SYSTEM_INSTRUCTION: {e}")
         return SYSTEM_INSTRUCTION
+
+
+# AgentCore Memory only accepts an actorId matching
+# [a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]* — no "+".
+# A caller's number in E.164 therefore can't be used as one directly: the
+# session manager's first ListEvents fails validation and memory is dropped
+# for the whole call ("[memory] could not start session manager"), which is
+# easy to miss because the call itself carries on working. Everything about
+# a returning caller's history depends on this id, so it's derived once here
+# rather than at each use site.
+_MEMORY_ACTOR_DISALLOWED = re.compile(r"[^0-9a-zA-Z]")
+
+
+def _memory_actor_id(mobile_number: str | None, fallback_session_id: str) -> str:
+    """A memory actor id for this caller that the service will accept.
+
+    Stable and reversible-by-eye ("+61412345678" -> "phone-61412345678") so a
+    returning caller lands on the same actor and their earlier calls are
+    still theirs. Every separator is dropped, not just the illegal ones, so
+    the same person typing "+61 412 345 678" one week and "+61412345678" the
+    next is one actor rather than two. Callers with no number get a per-call
+    id instead — see the note at the call site about why guessing an identity
+    there is worse.
+    """
+    if mobile_number:
+        return "phone-" + _MEMORY_ACTOR_DISALLOWED.sub("", mobile_number)
+    return f"anonymous-{fallback_session_id}"
 
 
 def build_memory_session_manager(actor_id: str, session_id: str):
@@ -346,11 +421,16 @@ class _LoggingTool(AgentTool):
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
         print(f"[tool call] {tool_use['name']}({tool_use.get('input')})")
-        result = None
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
-            result = event
+            # Logged as the result passes through, NOT after the loop: Strands'
+            # tool executor `return`s the moment it sees a ToolResultEvent
+            # (strands/tools/executors/_executor.py), abandoning this
+            # generator — so anything after the `async for` never runs. Every
+            # wrapper in this file that acts on a result does it here, inside
+            # the loop, for that reason.
+            if isinstance(event, ToolResultEvent):
+                print(f"[tool result] {tool_use['name']} -> {event}")
             yield event
-        print(f"[tool result] {tool_use['name']} -> {result}")
 
 
 class _MobileNumberSyncTool(AgentTool):
@@ -397,20 +477,16 @@ class _MobileNumberSyncTool(AgentTool):
         return self._wrapped.tool_spec
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
-        result_event = None
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
-            result_event = event
+            # Before the yield, not after the loop — see _LoggingTool.stream.
+            if isinstance(event, ToolResultEvent) and event.tool_result.get("status") == "success":
+                for value in (tool_use.get("input") or {}).values():
+                    if isinstance(value, str) and _PHONE_LIKE_PATTERN.match(value):
+                        if value != self._known[0]:
+                            self._known[0] = value
+                            await self._on_confirmed(value)
+                        break
             yield event
-
-        if not (isinstance(result_event, ToolResultEvent) and result_event.tool_result.get("status") == "success"):
-            return
-
-        for value in (tool_use.get("input") or {}).values():
-            if isinstance(value, str) and _PHONE_LIKE_PATTERN.match(value):
-                if value != self._known[0]:
-                    self._known[0] = value
-                    await self._on_confirmed(value)
-                break
 
 
 class _FixedArgumentTool(AgentTool):
@@ -498,6 +574,99 @@ def _extract_json(tool_result: ToolResult) -> dict[str, Any] | None:
     return None
 
 
+def _escalation_id_from(payload: Any, _depth: int = 0) -> str | None:
+    """The escalation id anywhere in a tool result, or None if it isn't one.
+
+    Detected by field name shape (any key mentioning "escalation" whose value
+    is a scalar), not by tool name — same reasoning as every other wrapper
+    here: the gateway's tool set is discovered live, so nothing hardcodes
+    which tool escalates. Today that's escalate's `escalation_id`.
+
+    The search is recursive, and re-parses JSON-encoded strings on the way
+    down, because how deeply the gateway nests a Lambda's return value is not
+    something this side controls: `{"escalation_id": …}` and an MCP-style
+    `{"content": [{"text": "{\\"escalation_id\\": …}"}]}` envelope both have to
+    count, or an escalation silently fails to notify anyone — the one failure
+    mode where the caller is left waiting for a human who was never told.
+    """
+    # Generous, because each envelope level costs two hops (container, then
+    # item) and a re-parsed JSON string costs another: a payload nested two
+    # envelopes deep already reaches 7. Only there to bound the walk.
+    if _depth > 16:
+        return None
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if "escalation" in key.lower() and isinstance(value, (str, int, float)) and str(value).strip():
+                return str(value)
+        for value in payload.values():
+            found = _escalation_id_from(value, _depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(payload, (list, tuple)):
+        for item in payload:
+            found = _escalation_id_from(item, _depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(payload, str) and "escalation" in payload.lower():
+        try:
+            return _escalation_id_from(json.loads(payload), _depth + 1)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+class _EscalationNotifierTool(AgentTool):
+    """Wraps an AgentTool so a successful escalation opens a human handoff:
+    records the reason on this call, posts it to Slack, and makes the call
+    joinable from the agent portal (see handoff.py).
+
+    Notifying happens in a background task rather than before this tool's
+    result is yielded: posting to Slack is a network round trip, and the
+    caller is sitting in a live voice call waiting for Ava's next sentence.
+    """
+
+    def __init__(self, wrapped: AgentTool, call: LiveCall) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._call = call
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            # Handled here, before the result is yielded, and NOT after the
+            # loop: Strands' tool executor returns as soon as it sees a
+            # ToolResultEvent and abandons this generator, so post-loop code
+            # never runs (see _LoggingTool.stream). Getting this wrong is
+            # silent — the escalation still queues, nobody is ever told.
+            if isinstance(event, ToolResultEvent) and event.tool_result.get("status") == "success":
+                # The whole result, not just _extract_json's view of it: that
+                # helper only looks one level into `content`, and this has to
+                # find the id wherever the gateway happens to put it.
+                escalation_id = _escalation_id_from(event.tool_result)
+                if escalation_id is not None:
+                    portal_url = await self._call.mark_escalated(
+                        tool_use.get("input") or {}, escalation_id)
+                    # Held on the call so the task isn't garbage-collected
+                    # mid-flight, which asyncio permits for a task nobody
+                    # references.
+                    self._call.slack_task = asyncio.create_task(
+                        handoff.notify_slack(self._call, portal_url))
+            yield event
+
+
 class _GroundingGateTool(AgentTool):
     """Wraps an AgentTool so any argument whose name matches a field some earlier
     tool call in this session actually returned must equal a value that was
@@ -557,17 +726,18 @@ class _GroundingGateTool(AgentTool):
             )
             return
 
-        result_event = None
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
-            result_event = event
+            # Recorded before the yield, not after the loop — post-loop code
+            # never runs here (see _LoggingTool.stream). This is the gate's
+            # entire memory of "what a lookup actually returned", so missing
+            # it left the gate with nothing to check later arguments against.
+            if isinstance(event, ToolResultEvent) and event.tool_result.get("status") == "success":
+                data = _extract_json(event.tool_result)
+                if data:
+                    for key, value in data.items():
+                        if isinstance(value, (str, int, float)):
+                            self._grounded_values.setdefault(key, set()).add(str(value))
             yield event
-
-        if isinstance(result_event, ToolResultEvent) and result_event.tool_result.get("status") == "success":
-            data = _extract_json(result_event.tool_result)
-            if data:
-                for key, value in data.items():
-                    if isinstance(value, (str, int, float)):
-                        self._grounded_values.setdefault(key, set()).add(str(value))
 
 
 class _ToolOutputSanitizerTool(AgentTool):
@@ -695,13 +865,13 @@ class _IdempotencyGateTool(AgentTool):
             yield ToolResultEvent({**cached_result, "toolUseId": tool_use["toolUseId"]})
             return
 
-        result_event = None
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
-            result_event = event
+            # Cached before the yield, not after the loop — post-loop code
+            # never runs here (see _LoggingTool.stream), which left this
+            # cache permanently empty and the replay protection inert.
+            if isinstance(event, ToolResultEvent):
+                self._cache[cache_key] = (now, event.tool_result)
             yield event
-
-        if isinstance(result_event, ToolResultEvent):
-            self._cache[cache_key] = (now, result_event.tool_result)
 
 
 class _HighValueClaimGateTool(AgentTool):
@@ -1116,10 +1286,14 @@ class _TranscriptConsistencyGateTool(AgentTool):
             return
 
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            # Recorded before the yield, not after the loop — post-loop code
+            # never runs here (see _LoggingTool.stream), so "numbers already
+            # tried this call" never accumulated and the stale-reuse check
+            # below had nothing to fire on.
+            if isinstance(event, ToolResultEvent):
+                for _, value in phone_args:
+                    self._tried_numbers.add(value)
             yield event
-
-        for _, value in phone_args:
-            self._tried_numbers.add(value)
 
 
 async def build_gateway_tools(
@@ -1127,6 +1301,7 @@ async def build_gateway_tools(
     recent_digits: _RecentUserDigits,
     on_mobile_number_confirmed: Callable[[str], Awaitable[None]],
     known_mobile_number: list[str | None],
+    live_call: LiveCall,
 ) -> list[AgentTool]:
     """Load every tool the gateway currently exposes, unmodified.
 
@@ -1144,7 +1319,9 @@ async def build_gateway_tools(
     argument — a date of birth, an account number — the model invented
     rather than one the caller actually provided), and
     _MobileNumberSyncTool (pushes a newly-confirmed mobile/phone number back
-    to the browser) — all scoped to this call's
+    to the browser), and _EscalationNotifierTool (a successful escalation
+    opens the human handoff — Slack message, joinable agent portal) — all
+    scoped to this call's
     grounded_values/cache/recent_digits/known_mobile_number, so state never
     leaks across connections.
     """
@@ -1166,6 +1343,7 @@ async def build_gateway_tools(
         tool = _HighValueClaimGateTool(tool)
         tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers)
         tool = _MobileNumberSyncTool(tool, on_mobile_number_confirmed, known_mobile_number)
+        tool = _EscalationNotifierTool(tool, live_call)
         wrapped.append(_LoggingTool(tool))
 
     return wrapped
@@ -1294,6 +1472,17 @@ _setup_telemetry()
 
 app = FastAPI()
 
+# The human handoff surface: /portal (the agent console), its call API, and
+# the portal WebSocket that bridges a human agent's audio into a live call.
+# AgentCore Runtime only requires /ws and /ping; these are extra routes on the
+# same app, which is what lets a human join a call this process is holding.
+app.include_router(handoff.router)
+# Mounting the portal's routes and applying its cross-origin policy are one
+# step, so a deployment that hosts portal.html elsewhere can't end up serving
+# a page that loads and then silently can't fetch. A no-op unless
+# PORTAL_ALLOWED_ORIGINS is set.
+handoff.install_portal_cors(app)
+
 
 @app.get("/ping")
 async def ping():
@@ -1301,12 +1490,47 @@ async def ping():
     return {"status": "Healthy", "time_of_last_update": int(datetime.now().timestamp())}
 
 
+# A Runtime session id is chosen by whoever presigns the URL, so it reaches
+# this process as client-controlled text and then travels on to a DynamoDB
+# attribute and into a signed URL's query string. Bounded to the characters
+# AgentCore itself accepts before any of that.
+_RUNTIME_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:@\-]{8,200}$")
+
+
 @app.websocket("/ws")
 async def voice_chat(websocket: WebSocket) -> None:
-    """WebSocket endpoint for one bidirectional voice call.
+    """The one WebSocket path this container publishes — and two kinds of
+    client arrive on it.
+
+    Normally a caller: _serve_caller runs their voice call, and returns None.
+
+    But AgentCore Runtime gives a container exactly this one path and picks the
+    instance from the session id in the signed URL, so a human agent joining a
+    live call has no other endpoint they could possibly use. They presign this
+    path with the *caller's* session id — which is what routes them into the
+    container holding that call — and their first frame says which call they
+    want (handoff.PORTAL_ATTACH_TYPE). _serve_caller hands that frame straight
+    back here, untouched, and the connection becomes a portal instead.
+
+    The dispatch is out here, rather than inside _serve_caller, because a
+    portal socket must survive that function's teardown: its `finally` ends a
+    call and closes the socket, both of which are exactly wrong for a
+    connection that is only now starting to do its job.
+    """
+    attach = await _serve_caller(websocket)
+    if attach is not None:
+        await handoff.serve_portal_socket(websocket, attach)
+
+
+async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
+    """One bidirectional voice call, or None—see voice_chat.
 
     A fresh BidiAgent and gateway connection are created per call, so
     concurrent callers never share state (session_id, tool results, etc).
+
+    Returns the portal attach frame if this connection turns out to be a human
+    agent rather than a caller, having left the socket open and untouched for
+    voice_chat to hand on. Returns None for every real call.
     """
     mcp_client = MCPClient(
         transport_callable=lambda: aws_iam_streamablehttp_client(
@@ -1321,6 +1545,13 @@ async def voice_chat(websocket: WebSocket) -> None:
     # under, and what a session summary is later extracted from.
     memory_session_id = str(uuid.uuid4())
 
+    # This call as the human-handoff side sees it: the transcript a human
+    # agent reads, the escalation reason, and the audio bridge. Registered up
+    # front (not at escalation time) because the transcript has to have been
+    # accumulating all along for it to be worth reading later.
+    live_call = handoff.register_call()
+    live_call.customer_send = websocket.send_json
+
     # Single-item mutable box (not a plain variable) so build_gateway_tools
     # -- which is already running as a background task by the time
     # mobile_number below is known -- and the seeding step further down
@@ -1328,6 +1559,11 @@ async def voice_chat(websocket: WebSocket) -> None:
     # copy from whenever they captured it. Also out here so the memory
     # write at teardown can read the final confirmed number.
     known_mobile_number: list[str | None] = [None]
+
+    # Set when the first frame reveals this isn't a caller at all. Read by the
+    # teardown below, which must then leave the socket (and the call this
+    # connection is joining) alone — see voice_chat.
+    handed_to_portal = False
 
     # build_gateway_tools() -> load_tools() starts mcp_client's own
     # background connection lazily; wrapping this in `with mcp_client:`
@@ -1343,13 +1579,16 @@ async def voice_chat(websocket: WebSocket) -> None:
         async def notify_mobile_number(value: str) -> None:
             # Best-effort: a send failing here (e.g. the socket closed mid-call)
             # shouldn't take down the call itself, just the UI sync.
+            live_call.mobile_number = value
             try:
                 await websocket.send_json({"type": "bidi_call_metadata_update", "mobile_number": value})
             except Exception as exc:
                 print(f"[mobile sync] failed to notify frontend: {exc}")
 
         tools_task = asyncio.create_task(
-            build_gateway_tools(mcp_client, recent_digits, notify_mobile_number, known_mobile_number)
+            build_gateway_tools(
+                mcp_client, recent_digits, notify_mobile_number, known_mobile_number, live_call
+            )
         )
         prompt_task = asyncio.create_task(get_system_prompt())
         await websocket.accept()
@@ -1362,14 +1601,65 @@ async def voice_chat(websocket: WebSocket) -> None:
         # concurrently with the tools/prompt loads below so it doesn't add
         # latency. A client that never sends it (or sends audio first) just
         # times out here and the call proceeds exactly as before.
-        async def receive_initial_metadata() -> dict[str, Any]:
+        #
+        # Returned raw rather than filtered to bidi_call_metadata, because this
+        # same frame is also how a human agent's portal identifies itself (see
+        # voice_chat) — a filter here would swallow that and leave the portal
+        # waiting forever for a call it never announced.
+        async def receive_first_message() -> dict[str, Any]:
             try:
                 message = await asyncio.wait_for(websocket.receive_json(), timeout=3.0)
             except Exception:
                 return {}
-            return message if isinstance(message, dict) and message.get("type") == "bidi_call_metadata" else {}
+            return message if isinstance(message, dict) else {}
 
-        metadata_task = asyncio.create_task(receive_initial_metadata())
+        first_message_task = asyncio.create_task(receive_first_message())
+
+        # Awaited before the gateway and prompt loads, not after: those are
+        # already in flight and keep loading regardless, and a portal
+        # connection has no use for either — making it wait on them would add a
+        # gateway round trip to every join for nothing.
+        first_message = await first_message_task
+        if handoff.is_portal_attach(first_message):
+            handed_to_portal = True
+            # Neither is needed now, and both hold a connection open.
+            tools_task.cancel()
+            prompt_task.cancel()
+            # This connection was never a call. Left registered, the
+            # placeholder above would show up on /portal/queue as a live call
+            # with no caller, and _prune_calls would never collect it — it only
+            # expires calls that have ENDED, which this one never will.
+            handoff.unregister_call(live_call)
+            return first_message
+
+        initial_metadata = (
+            first_message if first_message.get("type") == "bidi_call_metadata" else {}
+        )
+
+        # Which AgentCore Runtime session this call arrived on. A human agent
+        # joining later has to presign with this exact value to be routed to
+        # this container, so it goes onto the escalations row at escalation
+        # time (see handoff._persist_portal_keys) — nothing else in the system
+        # can discover it.
+        #
+        # Runtime does forward its own session header through the WebSocket
+        # handshake — confirmed on the deployed runtime by a client that sent
+        # no messages at all and was still logged with the right session id —
+        # and that's the source used. The caller page's own report (read out of
+        # the presigned URL it was handed) is a fallback for if that ever
+        # stops being true: the header is the platform's view of where it
+        # actually routed this connection, which beats a client's claim about
+        # it, so it wins whenever both are present.
+        runtime_session_id = websocket.headers.get(
+            "x-amzn-bedrock-agentcore-runtime-session-id") or ""
+        if not runtime_session_id:
+            claimed = initial_metadata.get("runtime_session_id")
+            if isinstance(claimed, str) and _RUNTIME_SESSION_ID_PATTERN.match(claimed.strip()):
+                runtime_session_id = claimed.strip()
+        live_call.runtime_session_id = runtime_session_id or None
+        print(f"[handoff] call {live_call.call_id} runtime session: " + (
+            runtime_session_id or "unknown — a portal hosted off this container will be "
+                                  "able to read this call but not join it"))
 
         tools = await tools_task
         system_prompt = await prompt_task
@@ -1398,7 +1688,6 @@ async def voice_chat(websocket: WebSocket) -> None:
         # (including an attempted prompt injection typed into the field —
         # this reaches the model as literal text below) is dropped, and the
         # call proceeds exactly as if no number had been provided.
-        initial_metadata = await metadata_task
         raw_mobile_number = initial_metadata.get("mobile_number")
         mobile_number = (
             raw_mobile_number.strip()
@@ -1411,13 +1700,58 @@ async def voice_chat(websocket: WebSocket) -> None:
         if mobile_number:
             recent_digits.seed(mobile_number)
             known_mobile_number[0] = mobile_number
+            # So a human agent picking this call up sees who's on the line.
+            live_call.mobile_number = mobile_number
+
+            # Opening sequence for a caller who identified themselves in the
+            # app: look their policy up *before* saying anything, then greet
+            # them by the name on it.
+            #
+            # This is appended to the system prompt rather than left to the
+            # kickoff text below because the base prompt (local
+            # SYSTEM_INSTRUCTION or, when BEDROCK_PROMPT_ID is set, whatever
+            # Bedrock Prompt Management currently holds) scripts an exact
+            # opening line. A user-role nudge doesn't reliably beat that;
+            # system-level text that says which of the two openings applies
+            # to this call does — and it keeps working without anyone having
+            # to edit the managed prompt in the console to match.
+            #
+            # No tool is named here (same reason as everywhere else in this
+            # file): the gateway's tool set is discovered live, so this
+            # describes the tool by what it does and lets the model pick it.
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "Opening sequence for this call — this replaces any scripted "
+                "opening line in the instructions above.\n"
+                "The caller identified themselves in the app before the call, so:\n"
+                "1. Say nothing at all yet. Your first action is to look up their "
+                "policy by that mobile number. No greeting, no \"one moment\", no "
+                "sound of any kind before the result comes back.\n"
+                "2. When it comes back, greet them by the first name on the policy "
+                "and introduce yourself in the same turn — for example: \"Hello "
+                "<first name>, I'm Ava, your AI Assistant. I can help with your "
+                "policy details, register a claim, or connect you with a human "
+                "agent.\" Use the name exactly as the lookup gave it; the first "
+                "name alone is enough. Then listen.\n"
+                "3. If the lookup returns no policy, or no name you can use, open "
+                "with that same line minus the name and carry on under the normal "
+                "rules — never guess, shorten or invent a name.\n"
+                "You already have the caller's details from this lookup, so don't "
+                "ask them for the number, mention the lookup, or repeat it."
+            )
 
         # A caller who didn't pre-fill their number gets a per-call actor id
         # instead: this call still gets session memory (and shows up whole in
         # observability), but there's nothing stable to tie it to a previous
         # or future call, which is the honest outcome -- guessing an identity
         # here would attach one caller's history to another's.
-        memory_actor_id = mobile_number or f"anonymous-{memory_session_id}"
+        memory_actor_id = _memory_actor_id(mobile_number, memory_session_id)
+
+        # Same keys the session manager writes under, handed to the handoff
+        # side so the agent portal can read this call's conversation back out
+        # of AgentCore Memory instead of relying on this process's own list.
+        live_call.memory_actor_id = memory_actor_id
+        live_call.memory_session_id = memory_session_id
 
         # Both built on a worker thread, not the event loop: creating the
         # session manager reads this actor's existing events from AWS, and
@@ -1473,8 +1807,9 @@ async def voice_chat(websocket: WebSocket) -> None:
                 "that correction overrides it — confirm the new number the normal "
                 "way (read it back one digit at a time, get an explicit yes) and "
                 "use only that confirmed number from then on, never falling back "
-                "to this original one. Greet the caller in one short sentence, "
-                "then look up their policy — begin now)"
+                "to this original one. Follow the opening sequence in your "
+                "instructions: look up the policy first, say nothing until the "
+                "result is back, then greet them by name — begin now)"
             )
         else:
             greeting_text = "(the call has just connected — begin now)"
@@ -1485,12 +1820,71 @@ async def voice_chat(websocket: WebSocket) -> None:
         # about this call.
         greeted = False
 
+        # One receive task, reused across keepalive timeouts. Not a fresh
+        # `asyncio.wait_for(websocket.receive_json(), ...)` each time: that
+        # cancels the pending receive, and a message arriving in the same
+        # instant is then lost. Holding the task and waiting on it again keeps
+        # every caller message.
+        pending_receive: asyncio.Task | None = None
+
+        async def next_caller_event() -> dict[str, Any] | None:
+            """The caller's next message, or None if KEEPALIVE_SECONDS passed."""
+            nonlocal pending_receive
+            if pending_receive is None:
+                pending_receive = asyncio.create_task(websocket.receive_json())
+            done, _ = await asyncio.wait({pending_receive}, timeout=KEEPALIVE_SECONDS)
+            if pending_receive in done:
+                message = pending_receive.result()
+                pending_receive = None
+                return message
+            return None
+
+        # The human-handoff bridge lives in these two functions, and nowhere
+        # else: `run()` pulls the caller's events through the first and pushes
+        # Ava's out through the second, so gating both is all it takes to hand
+        # a live call over to a person.
+        #
+        # What it must NOT do is stop feeding the model. Nova Sonic drops the
+        # session with "Timed out waiting for audio bytes or interactive
+        # content" after ~55s of silence on the wire, and that exception ends
+        # run() -- which tears down the caller's socket mid-sentence. Three
+        # ordinary things stop the audio: a human taking the call, the caller
+        # pressing mute (the browser sends nothing at all while muted), and a
+        # backgrounded tab throttling its timers. So whenever there's no real
+        # caller audio to forward, silence is fed in its place -- which is
+        # exactly what a live mic sends when nobody is talking.
         async def receive_with_greeting_kickoff():
             nonlocal greeted
             if not greeted:
                 greeted = True
                 return {"type": "bidi_text_input", "text": greeting_text}
-            return await websocket.receive_json()
+            while True:
+                message = await next_caller_event()
+                if message is None:
+                    return _silent_audio_event()  # nothing arriving; keep the session alive
+
+                # A portal that's open hears the call whether or not its agent
+                # has joined -- listening before taking over is the point.
+                if message.get("type") == "bidi_audio_input" and live_call.portals:
+                    await live_call.relay_caller_audio(message)
+
+                if live_call.human_on_call:
+                    # Ava is off the line: she must not hear the caller
+                    # talking to a person, but her session still has to be
+                    # fed, so the frame is replaced rather than dropped.
+                    if message.get("type") == "bidi_audio_input":
+                        return _silent_audio_event()
+                    continue
+                return _normalize_caller_audio(message)
+
+        async def send_to_caller(event: dict[str, Any]) -> None:
+            """Ava -> caller, unless a human has taken the call."""
+            event_type = event.get("type")
+            if event_type == "bidi_audio_stream":
+                await live_call.relay_ava_audio(event)
+            if live_call.human_on_call and event_type in {"bidi_audio_stream", "bidi_transcript_stream"}:
+                return
+            await websocket.send_json(event)
 
         async def log_event(event: dict[str, Any]) -> None:
             event_type = event.get("type")
@@ -1501,12 +1895,15 @@ async def voice_chat(websocket: WebSocket) -> None:
                     print(f"{who}: {text}")
                     if event.get("role") == "user":
                         recent_digits.record(text)
+                    # The same finished lines the caller sees, kept for
+                    # whoever picks this call up in the agent portal.
+                    await live_call.record_transcript(event.get("role") or "assistant", text)
             elif event_type == "bidi_interruption":
                 print(f"[interruption] {event.get('reason')}")
 
         await voice_agent.run(
             inputs=[receive_with_greeting_kickoff],
-            outputs=[websocket.send_json, log_event],
+            outputs=[send_to_caller, log_event],
         )
 
     except WebSocketDisconnect:
@@ -1517,22 +1914,56 @@ async def voice_chat(websocket: WebSocket) -> None:
 
         traceback.print_exc()
     finally:
-        # No explicit memory write here: the session manager persists each turn
-        # as it happens, so a call that drops mid-sentence keeps everything said
-        # up to that point rather than losing it all at teardown.
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-        if voice_agent is not None:
+        # Deliberately no `return` anywhere in this block: a return in a
+        # `finally` replaces whatever the `try` was returning, which here would
+        # silently discard the portal attach frame and drop the join.
+        #
+        # A connection handed on to the portal bridge is only just beginning:
+        # the socket belongs to serve_portal_socket now, and the call it's
+        # joining belongs to a different connection entirely. Ending that call
+        # or closing that socket is exactly what must not happen — so the
+        # caller teardown is skipped wholesale, and only the gateway client,
+        # which really was this function's, is cleaned up.
+        if handed_to_portal:
+            # These two were started before the first frame revealed this
+            # wasn't a call at all — the ordering that keeps a real caller's
+            # gateway round trip off their critical path. Nobody wants their
+            # results now.
+            #
+            # stop() is deliberately documented as safe on a partly-started
+            # client, but it joins a background thread, and a human agent is
+            # waiting on this socket to become their call — so it goes to a
+            # worker thread with a deadline rather than blocking the event
+            # loop for however long that join takes.
             try:
-                await voice_agent.stop()
+                await asyncio.wait_for(
+                    asyncio.to_thread(mcp_client.stop, None, None, None), timeout=5)
             except Exception as cleanup_error:
-                print(f"Error stopping voice agent: {cleanup_error}")
-        try:
-            mcp_client.stop(None, None, None)
-        except Exception as cleanup_error:
-            print(f"Error closing gateway connection: {cleanup_error}")
+                print(f"Error closing gateway connection: {cleanup_error}")
+        else:
+            # Tell any open portal the caller has gone, and keep the call readable
+            # there for a while (handoff.RETENTION_SECONDS) so a human following a
+            # Slack link a few minutes late still sees the conversation.
+            try:
+                await live_call.mark_ended()
+            except Exception as cleanup_error:
+                print(f"[handoff] error ending call {live_call.call_id}: {cleanup_error}")
+            # No explicit memory write here: the session manager persists each turn
+            # as it happens, so a call that drops mid-sentence keeps everything said
+            # up to that point rather than losing it all at teardown.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            if voice_agent is not None:
+                try:
+                    await voice_agent.stop()
+                except Exception as cleanup_error:
+                    print(f"Error stopping voice agent: {cleanup_error}")
+            try:
+                mcp_client.stop(None, None, None)
+            except Exception as cleanup_error:
+                print(f"Error closing gateway connection: {cleanup_error}")
 
 
 if __name__ == "__main__":
