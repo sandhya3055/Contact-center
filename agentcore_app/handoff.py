@@ -43,10 +43,12 @@ front of the portal routes.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from html import escape
@@ -55,6 +57,8 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
+
+import portal_context
 
 # Where the Slack message's button points. Must be reachable by whoever clicks
 # it in Slack -- http://127.0.0.1:8080 while developing locally, your public
@@ -168,6 +172,8 @@ class LiveCall:
         # The in-flight Slack notification, parked here so asyncio doesn't
         # garbage-collect a task nothing else holds a reference to.
         self.slack_task: asyncio.Task | None = None
+        # Likewise the escalations-row stamp, which notify_slack waits on.
+        self.portal_row_task: asyncio.Task | None = None
 
     # ---------------------------------------------------------------- state
 
@@ -282,12 +288,58 @@ class LiveCall:
             "details": {k: v for k, v in details.items() if k != "session_id"},
         }
         self.state = STATE_ESCALATED
+        # Not awaited: this is on the caller's critical path — the tool result
+        # Ava is waiting on to say "let me put you through" — and a DynamoDB
+        # round trip that goes wrong is seconds of dead air. notify_slack waits
+        # for it instead, which is the only ordering that actually matters: a
+        # human must not click a link before the row that authorizes them.
+        self.portal_row_task = asyncio.create_task(self._persist_portal_keys(escalation_id))
         await self.push_state()
         await self.to_customer({"type": "bidi_handoff", "state": STATE_ESCALATED})
         return self.portal_url()
 
+    async def _persist_portal_keys(self, escalation_id: str | None) -> None:
+        """Put this call's portal keys on the escalations row.
+
+        Best-effort by design: this only enables a portal hosted off this
+        container (see _write_portal_row). Failing it must not fail the
+        escalation, which is a caller waiting for a human — the portal served
+        from this process needs none of it.
+        """
+        if not escalation_id or not self.join_token:
+            return
+        fields: dict[str, Any] = {
+            "portalCallId": {"S": self.call_id},
+            "portalTokenHash": {"S": hashlib.sha256(self.join_token.encode()).hexdigest()},
+            "portalStartedAt": {"N": f"{self.started_at:.3f}"},
+            "portalEscalatedAt": {"N": f"{(self.escalation or {}).get('at', _now()):.3f}"},
+            # The tool's arguments verbatim, so both deployments of the portal
+            # render the same facts. callerNumber is deliberately absent: the
+            # escalate tool owns that field and this must not clobber it.
+            "portalDetails": {"S": json.dumps((self.escalation or {}).get("details") or {})},
+        }
+        if self.memory_actor_id:
+            fields["memoryActorId"] = {"S": self.memory_actor_id}
+        if self.memory_session_id:
+            fields["memorySessionId"] = {"S": self.memory_session_id}
+        try:
+            # An in-region UpdateItem is tens of milliseconds; this cap is for
+            # the pathological case, and it's short because notify_slack waits
+            # on it and someone is waiting on that.
+            await asyncio.wait_for(
+                asyncio.to_thread(_write_portal_row, escalation_id, fields), timeout=4)
+        except Exception as exc:
+            print(f"[handoff] couldn't stamp portal keys on {escalation_id}: {exc} "
+                  "— a portal hosted off this container won't resolve this call")
+
     def portal_url(self) -> str:
-        return f"{PORTAL_BASE_URL}/portal?call={self.call_id}&token={self.join_token}"
+        query = f"call={self.call_id}&token={self.join_token}"
+        # The escalation id is what a portal reading DynamoDB directly looks
+        # the call up by; the in-container portal ignores it and uses call+token.
+        escalation_id = (self.escalation or {}).get("escalation_id")
+        if escalation_id:
+            query += f"&esc={urllib.parse.quote(str(escalation_id), safe='')}"
+        return f"{PORTAL_BASE_URL}/portal?{query}"
 
     # ------------------------------------------------------- portal lifecycle
 
@@ -346,135 +398,68 @@ class LiveCall:
 
 
 # ------------------------------------------------- authoritative records
-
-_boto3 = None  # imported lazily: only needed when a portal actually asks
-
-
-def _client(service: str, region: str):
-    global _boto3
-    if _boto3 is None:
-        import boto3 as _b
-        _boto3 = _b
-    return _boto3.client(service, region_name=region)
-
-
-def _plain(value: Any) -> Any:
-    """DynamoDB numbers come back as Decimal, which json can't encode."""
-    if isinstance(value, list):
-        return [_plain(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _plain(v) for k, v in value.items()}
-    if type(value).__name__ == "Decimal":
-        return int(value) if value == value.to_integral_value() else float(value)
-    return value
-
-
-def _fetch_escalation_row(escalation_id: str) -> dict[str, Any] | None:
-    """Blocking GetItem on the escalations table — call via asyncio.to_thread."""
-    from boto3.dynamodb.types import TypeDeserializer
-
-    client = _client("dynamodb", ESCALATIONS_REGION)
-    response = client.get_item(
-        TableName=ESCALATIONS_TABLE, Key={"escalationId": {"S": escalation_id}}
-    )
-    item = response.get("Item")
-    if not item:
-        return None
-    deserialize = TypeDeserializer().deserialize
-    return _plain({key: deserialize(value) for key, value in item.items()})
-
-
-def _fetch_memory_transcript(actor_id: str, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
-    """The conversation as AgentCore Memory holds it (blocking; use a thread).
-
-    Events come back newest-first and mix two payload kinds: `conversational`
-    (a turn) and `blob` (the agent's own serialized state, which is not
-    conversation and is skipped). A turn's text is itself a JSON document
-    wrapping the message, so the role comes from inside it rather than from
-    the event envelope.
-    """
-    client = _client("bedrock-agentcore", MEMORY_REGION)
-    events: list[dict[str, Any]] = []
-    token = None
-    while len(events) < limit:
-        kwargs = {"memoryId": MEMORY_ID, "actorId": actor_id, "sessionId": session_id,
-                  "maxResults": min(100, limit - len(events))}
-        if token:
-            kwargs["nextToken"] = token
-        page = client.list_events(**kwargs)
-        events.extend(page.get("events", []))
-        token = page.get("nextToken")
-        if not token:
-            break
-
-    lines: list[dict[str, Any]] = []
-    for event in events:
-        stamp = event.get("eventTimestamp")
-        at = stamp.timestamp() if hasattr(stamp, "timestamp") else _now()
-        for item in event.get("payload", []):
-            conversational = item.get("conversational")
-            if not conversational:
-                continue
-            text = (conversational.get("content") or {}).get("text")
-            if not isinstance(text, str):
-                continue
-            role = str(conversational.get("role") or "").lower()
-            body = text
-            try:
-                message = json.loads(text).get("message", {})
-                role = str(message.get("role") or role).lower()
-                body = " ".join(
-                    part.get("text", "") for part in message.get("content", [])
-                    if isinstance(part, dict)
-                ).strip()
-            except (json.JSONDecodeError, AttributeError, TypeError):
-                pass
-            # The kickoff nudge strands_agent.py sends to make Ava speak first
-            # is framed as a caller line but nobody said it.
-            if not body or "the call has just connected" in body:
-                continue
-            lines.append({"role": "user" if role == "user" else "assistant",
-                          "text": body, "at": at, "source": "memory"})
-    lines.reverse()  # oldest first, as a transcript reads
-    return lines
+#
+# The reading itself lives in portal_context.py, shared verbatim with
+# lambda/portal_context_handler.py so a portal hosted off this container parses
+# AgentCore Memory the same way this one does.
 
 
 async def load_context(call: LiveCall) -> dict[str, Any]:
-    """The portal's view of the durable records behind this call.
-
-    Both lookups are best-effort and independent: a missing memory id or an
-    IAM gap on one of them must still leave the human with the other, and
-    with the live call itself, rather than an error page.
-    """
-    context: dict[str, Any] = {"memory": [], "record": None, "notes": []}
-
+    """The portal's view of the durable records behind this call."""
     escalation_id = (call.escalation or {}).get("escalation_id")
+    row: dict[str, Any] | None = None
+    row_error: str | None = None
     if escalation_id:
         try:
-            row = await asyncio.to_thread(_fetch_escalation_row, escalation_id)
-            context["record"] = row
-            if row is None:
-                context["notes"].append(
-                    f"No row for {escalation_id} in the {ESCALATIONS_TABLE} table.")
+            row = await asyncio.to_thread(
+                portal_context.fetch_escalation_row,
+                ESCALATIONS_TABLE, ESCALATIONS_REGION, escalation_id)
         except Exception as exc:
-            context["notes"].append(f"Couldn't read the escalations table: {exc}")
+            row_error = f"Couldn't read the escalations table: {exc}"
             print(f"[handoff] escalations table read failed: {exc}")
 
-    if MEMORY_ID and call.memory_actor_id and call.memory_session_id:
-        try:
-            context["memory"] = await asyncio.to_thread(
-                _fetch_memory_transcript, call.memory_actor_id, call.memory_session_id)
-            if not context["memory"]:
-                context["notes"].append(
-                    "AgentCore Memory has no turns for this session yet — it's written "
-                    "asynchronously during the call, so it can lag by a few seconds.")
-        except Exception as exc:
-            context["notes"].append(f"Couldn't read AgentCore Memory: {exc}")
-            print(f"[handoff] memory read failed: {exc}")
-    elif not MEMORY_ID:
-        context["notes"].append("MEMORY_ID isn't set, so this call isn't being persisted.")
+    return await asyncio.to_thread(
+        portal_context.build_context,
+        record=row,
+        escalation_id=escalation_id,
+        table_label=ESCALATIONS_TABLE,
+        memory_actor_id=call.memory_actor_id,
+        memory_session_id=call.memory_session_id,
+        memory_id=MEMORY_ID,
+        memory_region=MEMORY_REGION,
+        record_error=row_error,
+    )
 
-    return context
+
+def _write_portal_row(escalation_id: str, fields: dict[str, Any]) -> None:
+    """Stamp the escalations row with what an off-container portal needs.
+
+    Blocking; call via asyncio.to_thread.
+
+    Everything the portal shows before anyone joins — the reason, the caller,
+    the conversation — is derivable from DynamoDB and AgentCore Memory, but
+    only if the reader knows *which* memory session to look in and is allowed
+    to look. Those two facts live in this process's memory and nowhere else, so
+    they get written here, alongside a hash of the portal token.
+
+    A hash, not the token: the token is 24 random bytes with no dictionary to
+    attack, so sha256 with no salt is enough to make a leaked table row useless
+    for reaching a live caller.
+
+    The condition matters. UpdateItem creates the item when it's missing, and a
+    row holding only these fields — no status, no queueKey — would be a phantom
+    escalation the queue's GSI can't order and the ACD would trip over. If the
+    escalate tool's own write hasn't landed, this must fail instead.
+    """
+    expression = ", ".join(f"#{key} = :{key}" for key in fields)
+    portal_context.client("dynamodb", ESCALATIONS_REGION).update_item(
+        TableName=ESCALATIONS_TABLE,
+        Key={"escalationId": {"S": escalation_id}},
+        UpdateExpression=f"SET {expression}",
+        ExpressionAttributeNames={f"#{key}": key for key in fields},
+        ExpressionAttributeValues={f":{key}": value for key, value in fields.items()},
+        ConditionExpression="attribute_exists(escalationId)",
+    )
 
 
 def register_call(mobile_number: str | None = None) -> LiveCall:
@@ -567,6 +552,15 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
     not break the call the caller is still on — the link is printed either
     way, so a local run without Slack configured is still usable."""
     print(f"[handoff] escalation on call {call.call_id} — portal: {portal_url}")
+    # The link is about to become clickable, so let the row that authorizes it
+    # land first. Off the caller's critical path — they're hearing Ava say a
+    # colleague is coming — and bounded, because a stuck write must not swallow
+    # the notification that a person is waiting.
+    if call.portal_row_task is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(call.portal_row_task), timeout=10)
+        except Exception:
+            pass
     if not (SLACK_BOT_TOKEN and SLACK_ESCALATION_CHANNEL):
         print("[handoff] SLACK_BOT_TOKEN/SLACK_ESCALATION_CHANNEL not set — "
               "not posting to Slack; use the portal link above")

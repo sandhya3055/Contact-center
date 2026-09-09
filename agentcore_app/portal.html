@@ -333,7 +333,7 @@
           <button class="btn btn--leave" id="leaveBtn">Leave call</button>
         </div>
 
-        <div class="meters">
+        <div class="meters" id="meters">
           <div class="meter-row">
             <span class="who">Caller</span>
             <div class="bars" id="callerBars" data-active="true">
@@ -392,6 +392,9 @@
 const params = new URLSearchParams(location.search);
 const CALL_ID = params.get('call') || '';
 const TOKEN = params.get('token') || '';
+// The escalation id, for reading the durable records without the agent at all.
+// Same token authorizes both; the agent stamped its hash onto that row.
+const ESC_ID = params.get('esc') || '';
 
 // Where the agent is. Empty means "this same origin", which is the case when
 // the agent serves this page itself (GET /portal) — the default, and what a
@@ -400,6 +403,20 @@ const TOKEN = params.get('token') || '';
 // the agent then needs that origin in PORTAL_ALLOWED_ORIGINS to accept the
 // cross-origin fetch and socket.
 const API_BASE = String(window.AVA_PORTAL_CONFIG?.apiBase || '').trim().replace(/\/+$/, '');
+
+// Where the durable records are, when they don't come through the agent: the
+// portal-context Lambda, reading the escalations table and AgentCore Memory
+// directly. Set, this is the page's primary source — it answers whether or not
+// a container is still holding the call, so the reason, the queue row and the
+// conversation render even for a call that has ended. The agent (API_BASE) is
+// then only needed for live state and audio, and its absence costs the Join
+// button rather than the whole page.
+const CONTEXT_URL = String(window.AVA_PORTAL_CONFIG?.contextUrl || '').trim().replace(/\/+$/, '');
+
+// config.js exists at all only when this page was built for a static host, so
+// its presence is what distinguishes "hosted off the agent, and told nothing
+// about it" from "the agent is serving this page from its own origin".
+const HOSTED = !!window.AVA_PORTAL_CONFIG;
 
 const apiUrl = (path) => `${API_BASE}${path}`;
 
@@ -444,6 +461,10 @@ let muted = false;
 let callState = null;
 let startedAt = null;
 let timerInterval = null;
+// Whether the agent's socket is reachable, i.e. whether this page can put the
+// human on the call or only show them what happened. False until proven.
+let liveAvailable = false;
+let liveNote = '';
 
 function showDead(title, body) {
   deadTitle.textContent = title;
@@ -630,6 +651,10 @@ audioNudge.addEventListener('click', async () => {
 
 // ------------------------------------------------------------------ render
 function fmtTime(epochSeconds) {
+  // Not every source has every timestamp — the escalations row carries the
+  // ones the agent stamped on it and nothing more. Say so, rather than
+  // rendering "Invalid Date" and leaving the human to guess what's wrong.
+  if (!epochSeconds) return 'unknown';
   return new Date(epochSeconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
@@ -744,7 +769,13 @@ function addSystemLine(text) {
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }
 
+function stopTimer() {
+  clearInterval(timerInterval);
+  topTimer.hidden = true;
+}
+
 function startTimer(from) {
+  if (!from) return stopTimer();   // an unknown start time can't be counted from
   startedAt = from * 1000;
   topTimer.hidden = false;
   const tick = () => {
@@ -799,25 +830,34 @@ function renderCall(call, isFirst) {
   if (isFirst) {
     liveLines = (call.transcript || []).slice();
     renderConversation();
-    startTimer(call.started_at);
+    // Only the live source can be counted from: the durable record's
+    // started_at is when the call began, but it may be long over.
+    if (liveAvailable) startTimer(call.started_at); else stopTimer();
   }
 
   const ended = call.state === 'ended';
   const iAmOn = joined && call.state === 'human';
   const someoneElseOn = !joined && call.state === 'human';
 
-  joinBlock.hidden = iAmOn || ended;
+  // With no live call behind the page, the name field, the Join button and the
+  // level meters are all promises it can't keep — the note is the whole story.
+  joinBlock.hidden = iAmOn || ended || !liveAvailable;
+  el('meters').hidden = !liveAvailable;
   liveControls.hidden = !iAmOn;
   onAir.hidden = !iAmOn;
-  joinBtn.disabled = ended || someoneElseOn;
-  el('callerBars').dataset.active = String(!ended);
+  // Joining needs a socket to the agent. Without one this page is a record,
+  // and an enabled button would promise something it can't do.
+  joinBtn.disabled = ended || someoneElseOn || !liveAvailable;
+  el('callerBars').dataset.active = String(!ended && liveAvailable);
   el('selfBars').dataset.active = String(iAmOn);
   el('selfBars').dataset.muted = String(muted);
 
   if (ended) {
     joinNote.textContent = 'The caller has hung up. This page is the record of the call.';
-    clearInterval(timerInterval);
-    topTimer.hidden = true;
+    stopTimer();
+  } else if (!liveAvailable) {
+    joinNote.textContent = liveNote
+      || 'Live audio isn’t available from here — this is the record of the call.';
   } else if (someoneElseOn) {
     joinNote.textContent = `${call.human_label || 'Another agent'} is on this call. You can listen in.`;
   } else if (iAmOn) {
@@ -829,11 +869,89 @@ function renderCall(call, isFirst) {
     : 'Everything the caller and Ava said on this call.';
 }
 
+// --------------------------------------------------------- durable records
+// The escalations row and AgentCore Memory, read straight from the source by
+// the portal-context Lambda. Independent of the agent: this is what makes the
+// page work for a call whose container is gone, and what makes it work at all
+// when the agent has no browser-reachable origin.
+const contextUrl = () =>
+  `${CONTEXT_URL}?esc=${encodeURIComponent(ESC_ID)}&token=${encodeURIComponent(TOKEN)}`;
+
+async function loadRecords({ first = false } = {}) {
+  const res = await fetch(contextUrl());
+  if (res.status === 403) {
+    const err = new Error('forbidden');
+    err.forbidden = true;
+    throw err;
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data || !Array.isArray(data.memory)) {
+    throw new Error('that endpoint didn’t answer with a call context');
+  }
+  memoryLines = data.memory;
+  renderConversation();
+  renderRecord(data);
+  // The row's view of the call, in snapshot shape — used for the first render
+  // only, so a later refresh can't clobber live state the socket has since
+  // sent (the row always says "escalated"; the socket may say "human").
+  if (first && data.call) renderCall(data.call, true);
+  return data;
+}
+
+function setLiveUnavailable(note) {
+  liveAvailable = false;
+  liveNote = note;
+  if (callState) renderCall(callState, false);
+  else joinNote.textContent = note;
+}
+
 // ------------------------------------------------------------------ socket
 async function connect() {
   if (!CALL_ID || !TOKEN) {
     showDead('This link is incomplete',
       'It’s missing the call id or its access token. Open the escalation link from Slack directly, rather than retyping it.');
+    return;
+  }
+
+  // Records first when they're available from the Lambda: two AWS reads are
+  // slower than the agent's in-memory snapshot but they always work, so the
+  // page has content before the agent is known to be reachable — and keeps it
+  // if the agent turns out not to be.
+  let haveRecords = false;
+  if (CONTEXT_URL && ESC_ID) {
+    consoleEl.hidden = false;
+    try {
+      await loadRecords({ first: true });
+      haveRecords = true;
+      refreshBtn.disabled = false;
+    } catch (err) {
+      if (err.forbidden) {
+        showDead('This handoff link isn’t valid',
+          'Its token doesn’t match the escalation, or the escalation has expired from the queue. '
+          + 'Ask for a fresh escalation link in Slack.');
+        return;
+      }
+      consoleEl.hidden = true;
+      addSystemLine(`Couldn’t read the escalation records: ${err.message}`);
+      console.warn('[portal] context load failed', err);
+    }
+  }
+
+  if (!API_BASE && HOSTED) {
+    // Hosted off the agent (config.js exists) with no agent origin configured:
+    // there is nothing to connect to, and falling back to same-origin would
+    // fetch this static host and get its 404 — reported as if the agent were
+    // down, which it may well not be.
+    if (!haveRecords) {
+      showDead('This portal has nothing to read',
+        'Neither PORTAL_CONTEXT_URL nor PORTAL_API_BASE gave this page any data. Check the '
+        + 'Amplify environment variables, then redeploy.');
+      return;
+    }
+    consoleEl.hidden = false;
+    setLiveUnavailable('This portal is configured for records only — no agent endpoint is set, '
+      + 'so the call can’t be joined from here.');
     return;
   }
 
@@ -843,18 +961,44 @@ async function connect() {
   // plain 1006 close with no code — "wrong token" and "service down" look
   // identical from here. This endpoint distinguishes them, and doubles as the
   // first render so the page isn't blank while the socket opens.
+  // With records on the page already, a live call that can't be reached is a
+  // missing Join button, not a dead end — and the commonest reason for it is
+  // benign: the agent drops a call from memory HANDOFF_RETENTION_SECONDS after
+  // it ends, while the records outlive it by the row's TTL.
+  const liveFailed = (title, detail) => {
+    if (haveRecords) setLiveUnavailable(detail);
+    else showDead(title, detail);
+  };
+
   try {
     const res = await fetch(apiUrl(`/portal/api/call/${encodeURIComponent(CALL_ID)}?token=${encodeURIComponent(TOKEN)}`));
     if (res.status === 403) {
-      showDead('This handoff link isn’t valid',
-        'The call may have ended some time ago, or this link’s token doesn’t match. Ask for a fresh escalation link in Slack.');
+      liveFailed('This handoff link isn’t valid',
+        haveRecords
+          ? 'This call is no longer live — the agent has released it, so there’s nobody to join. What was said is below.'
+          : 'The call may have ended some time ago, or this link’s token doesn’t match. Ask for a fresh escalation link in Slack.');
       return;
     }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const call = await res.json();
+    // A 200 carrying JSON is not proof we reached the agent: point apiBase at
+    // any other service that answers every path with an object — a Lambda
+    // Function URL, an API gateway's default route — and the fields below are
+    // simply absent, which renders as a plausible-looking console showing
+    // "Invalid Date" and an empty transcript. Fail loudly on the shape instead.
+    if (!call || typeof call.state !== 'string' || typeof call.started_at !== 'number') {
+      liveFailed('That’s not the agent service',
+        `${API_BASE || location.origin} answered, but not with a call. PORTAL_API_BASE must be the origin `
+        + 'of the agent process itself — the one serving /ws and /portal — not a presigned-URL Lambda, '
+        + 'this page’s own domain, or an AgentCore Runtime endpoint.');
+      return;
+    }
     consoleEl.hidden = false;
-    renderCall(await res.json(), true);
+    liveAvailable = true;
+    renderCall(call, true);
   } catch (err) {
-    showDead('Can’t reach the call service', `${err.message}. The agent service may be down — try again, or ask in Slack.`);
+    liveFailed('Can’t reach the call service',
+      `${err.message}. The agent service may be down — try again, or ask in Slack.`);
     return;
   }
 
@@ -872,6 +1016,12 @@ async function connect() {
     } else if (data.type === 'transcript') {
       addTranscriptLine(data.line);
     } else if (data.type === 'context') {
+      // Ignored when the Lambda is the records source. The agent reads the
+      // same two services, but not necessarily successfully — a container
+      // without MEMORY_ID set, or without ListEvents on the memory resource,
+      // sends an empty conversation, and taking it would wipe the transcript
+      // the Lambda just loaded.
+      if (CONTEXT_URL && ESC_ID) return;
       memoryLines = data.memory || [];
       renderConversation();
       renderRecord(data);
@@ -887,15 +1037,26 @@ async function connect() {
     topStatus.className = 'status ended';
     topStatus.textContent = 'Disconnected';
     joined = false;
+    liveAvailable = false;
     stopMic();
     liveControls.hidden = true;
     onAir.hidden = true;
+    // Joining needs the socket, so the button must not look available: with it
+    // enabled a click reports "you joined the call" while send() silently
+    // discards the message on a closed socket.
+    joinBtn.disabled = true;
+    joinNote.textContent = 'Connection to the call service was lost. Reload to reconnect.';
+    el('callerBars').dataset.active = 'false';
     addSystemLine('Portal disconnected.');
   };
 }
 
 // ------------------------------------------------------------------ actions
 joinBtn.addEventListener('click', async () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addSystemLine('Not connected to the call service — nothing was sent. Reload the page.');
+    return;
+  }
   const name = agentName.value.trim();
   localStorage.setItem('ava_agent_name', name);
   joinBtn.disabled = true;
@@ -928,10 +1089,24 @@ muteBtn.addEventListener('click', () => {
   el('selfBars').dataset.muted = String(muted);
 });
 
-refreshBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+// Memory is written asynchronously during the call, so the last turn or two
+// often isn't in it yet and the human gets to ask again rather than reload.
+refreshBtn.addEventListener('click', async () => {
   refreshBtn.disabled = true;
-  ws.send(JSON.stringify({ type: 'refresh_context' }));
+  if (CONTEXT_URL && ESC_ID) {
+    try {
+      await loadRecords();
+    } catch (err) {
+      addSystemLine(`Refresh failed: ${err.message}`);
+    }
+    refreshBtn.disabled = false;
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addSystemLine('Not connected — nothing to refresh from.');
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'refresh_context' }));   // re-enabled on arrival
 });
 
 window.addEventListener('beforeunload', () => {

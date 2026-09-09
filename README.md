@@ -356,11 +356,16 @@ Two limits to know before this fronts real callers:
   the conversation, then dropped; AgentCore Memory remains the durable record.
 - **On AgentCore Runtime the portal needs its own way in.** Callers reach the
   runtime through `InvokeAgentRuntimeWithWebSocketStream` (a signed WebSocket
-  invocation), not as an ordinary HTTP origin — so a plain
-  `https://…/portal` GET isn't served by that path, and `PORTAL_BASE_URL`
-  has to point at something that does route to the container (an ALB or API
-  Gateway in front of port 8080). Locally, where `strands_agent.py` is just a
-  uvicorn server, `http://127.0.0.1:8080` works as-is.
+  invocation), not as an ordinary HTTP origin — so a plain `https://…/portal`
+  GET isn't served by that path at all. The escalation reason, the queue row
+  and the conversation don't need the container (see the Amplify section:
+  [`lambda/portal_context_handler.py`](lambda/portal_context_handler.py) reads
+  them from DynamoDB and AgentCore Memory), but **joining the live call does**,
+  because the caller's socket is an object in that process's memory. For that,
+  `PORTAL_BASE_URL` has to point at something that routes to the container: an
+  ALB in front of port 8080, or a tunnel while developing. Locally, where
+  `strands_agent.py` is just a uvicorn server, `http://127.0.0.1:8080` works
+  as-is.
 
 ### Hosting the pages on AWS Amplify
 
@@ -383,29 +388,99 @@ page fetches it cross-origin. (Serving over HTTPS has a side benefit: it's a
 secure context, so the microphone works — a `file://` page can't load the
 AudioWorklet module in current Chrome.)
 
-**Agent portal** — the portal has no data of its own: the transcript, the
-escalation and the audio bridge all live in the agent process. Hosting the page
-elsewhere therefore takes three settings, one on Amplify and two on the agent:
+**Agent portal** — the portal needs two unrelated things, and only one of them
+needs the agent container. Sorting that out is what makes it hostable at all:
+
+| What the page shows | Where it comes from | Needs the container? |
+| --- | --- | --- |
+| Escalation reason, queue row, conversation | the escalations table + AgentCore Memory | **No** |
+| Live call state and the audio bridge (Join) | the process holding the caller's socket | **Yes** |
+
+So there are two variables, and they are not alternatives — set both for a
+working portal, or just the first for a read-only one:
 
 ```
 # Amplify
-PORTAL_API_BASE        = https://<agent-origin>        # where the page calls
+PORTAL_CONTEXT_URL     = https://<portal-context-lambda-url>   # records
+PORTAL_API_BASE        = https://<agent-origin>                # live call + audio
 # agent
 PORTAL_ALLOWED_ORIGINS = https://<amplify-domain>      # CORS + WS origin check
 PORTAL_BASE_URL        = https://<amplify-domain>      # so Slack links point here
 ```
 
-`PORTAL_API_BASE` unset skips the portal entirely, which is the right choice
-when the agent serves it itself at `GET /portal`. When set, the page ships as
+With both unset the portal is skipped entirely, which is right when the agent
+serves it itself at `GET /portal`. With either set, the page ships as
 `dist/portal/index.html`, so the `/portal` path the Slack link already builds
 resolves with no Amplify rewrite rule to maintain.
 
-The agent must be reachable from a browser over `https`/`wss`, which on
-AgentCore Runtime means an ALB or API Gateway in front of port 8080 — the
-runtime's own invocation path isn't an ordinary HTTPS origin. And once the
-portal is internet-facing, put real authentication in front of it (Amplify
-access control, Cognito, or an authenticated ALB rule); the per-escalation
-token is a reasonable gate on localhost and a thin one on the public internet.
+#### `PORTAL_CONTEXT_URL` — the records
+
+[`lambda/portal_context_handler.py`](lambda/portal_context_handler.py) behind a
+Function URL. It reads the escalations row and AgentCore Memory directly, so it
+answers whether or not a container is still holding the call — which also means
+the portal keeps working after the call ends, where the agent's own registry
+drops it after `HANDOFF_RETENTION_SECONDS`.
+
+It shares
+[`agentcore_app/portal_context.py`](agentcore_app/portal_context.py) with the
+container verbatim (`lambda/portal_context.py` is a symlink) so both parse
+memory events the same way. Deploy it with:
+
+```
+ESCALATIONS_TABLE = escalations                    # same table the escalate tool writes
+MEMORY_ID         = <the agent's memory id>
+ALLOWED_ORIGIN    = https://<amplify-domain>       # defaults to "*"
+```
+
+and an execution role with `dynamodb:GetItem` on the table plus
+`bedrock-agentcore:ListEvents` on the memory resource. Package
+`boto3>=1.40` with it (`lambda/portal_context_requirements.txt`) — the
+runtime's bundled copy generally doesn't know the `bedrock-agentcore` client,
+and without it the row still loads while the conversation comes back as a note.
+
+Authorization is the same per-escalation token from the Slack link, and the
+Lambda shares no secret with the container to check it: when a call escalates,
+the agent stamps `sha256(token)` onto the escalations row along with the memory
+session to read and the call's start time, and the Lambda compares against that
+hash. So a leaked table row grants nothing, and the agent needs
+**`dynamodb:UpdateItem`** on the table for the stamp (without it everything
+else still works and only this hosted portal can't resolve the call — the log
+says so, once per escalation).
+
+#### `PORTAL_API_BASE` — the live call
+
+Scheme + host (+ port) only, no path: the page appends `/portal/api/...` and
+`/portal/ws/...` itself. It must be the origin of the `strands_agent.py`
+process itself. What it can be:
+
+| Where the agent runs | value |
+| --- | --- |
+| Your machine, through a tunnel (ngrok, Cloudflare Tunnel) | `https://a1b2c3.ngrok-free.app` |
+| A container (ECS/Fargate/EC2) behind an **ALB** with an ACM cert | `https://agent.yourdomain.com` |
+| CloudFront in front of that ALB | `https://agent.yourdomain.com` |
+
+Not usable: `http://127.0.0.1:8080` (an HTTPS page can't call `http://` or
+`ws://` — mixed content), a raw `*.elb.amazonaws.com` name (no cert), the
+AgentCore Runtime ARN (a signed invocation, not an HTTP origin), or — the easy
+mistake — **the presign API Gateway from `CALL_ENDPOINT`**. That one answers
+every path with `{"url": …}` and permissive CORS, so the page's snapshot fetch
+appears to succeed and used to render a call with "Invalid Date" and an empty
+transcript. The page now validates the shape and names the misconfiguration
+instead.
+
+**An ALB, specifically** — not API Gateway. Its HTTP APIs don't proxy
+WebSocket connections, and its WebSocket APIs use a route plus `@connections`
+model rather than a transparent proxy, so the audio bridge would have to be
+rewritten around it. An ALB passes WebSockets straight through.
+
+With `PORTAL_CONTEXT_URL` set and the agent unreachable, the page renders the
+records and disables Join with the reason, rather than failing whole — the
+commonest cause is benign (the call ended and the agent released it).
+
+And once the portal is internet-facing, put real authentication in front of it
+(Amplify access control, Cognito, or an authenticated ALB rule); the
+per-escalation token is a reasonable gate on localhost and a thin one on the
+public internet.
 
 ### Run it locally (no AWS deploy needed)
 

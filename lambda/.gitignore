@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .venv/*
 package/
+# deployment artifacts: rebuilt by the commands in agentcore_app/DEPLOY.md
+build/
+*.zip

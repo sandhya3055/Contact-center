@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
 # portal.html is read at request time by handoff.py, so it has to ship too.
-COPY strands_agent.py handoff.py portal.html ./
+COPY strands_agent.py handoff.py portal_context.py portal.html ./
 
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
