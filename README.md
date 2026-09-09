@@ -454,9 +454,11 @@ out a credential, not just a transcript.
 
 and an execution role with `dynamodb:GetItem` on the table,
 `bedrock-agentcore:ListEvents` on the memory resource, and
-`bedrock-agentcore:InvokeAgentRuntime` on the runtime (that last one only for
-the join URL — without it the records still work and the page says why Join is
-unavailable). Package
+`bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream` on the runtime — that
+last one only for the join URL, and specifically **not** `InvokeAgentRuntime`,
+which covers `/invocations` and leaves a presigned `/ws` refused with a bare
+`HTTP 403` at the handshake. Without it the records still work and the page says
+why Join is unavailable. Package
 `boto3>=1.40` with it (`lambda/portal_context_requirements.txt`) — the
 runtime's bundled copy generally doesn't know the `bedrock-agentcore` client,
 and without it the row still loads while the conversation comes back as a note.
@@ -533,6 +535,13 @@ Two things have to be true, and the container's log says so once per call:
 The URL is a real credential while it lives: scoped to one session id, expiring
 (`JOIN_URL_TTL_SECONDS`, default 15 minutes), minted only after the token check
 passes, and never logged.
+
+There is deliberately no `Origin` check on the agent's side of this path, and
+adding one would break every join: Runtime terminates the browser's WebSocket
+and opens its own to the container, carrying its own origin
+(`https://cell01.<region>.prod.arp.kepler-analytics.aws.dev`). The browser's
+origin is never visible there. `PORTAL_ALLOWED_ORIGINS` still applies to the
+direct `/portal/ws/{call_id}` route, where the header really is the browser's.
 
 And once the portal is internet-facing, put real authentication in front of it
 (Amplify access control, Cognito, or an authenticated ALB rule); the

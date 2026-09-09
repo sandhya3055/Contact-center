@@ -807,26 +807,23 @@ async def serve_portal_socket(websocket: WebSocket, attach: dict[str, Any]) -> N
     causes — a stale link, and a call now held by a different instance — need
     different actions from the person reading the page.
 
-    What authorizes this is the same per-escalation token as the other door,
-    plus something the direct door doesn't have: the presigned URL itself,
-    which only the portal-context Lambda can mint and only for someone who
-    already proved they hold that token.
+    There is deliberately no Origin check on this path, unlike portal_ws where
+    it is mandatory. Runtime terminates the browser's WebSocket and opens its
+    own connection to this container, carrying its own Origin — observed as
+    `https://cell01.<region>.prod.arp.kepler-analytics.aws.dev`, an internal
+    AgentCore hostname. So the browser's origin is not merely sometimes absent
+    here, it is never visible: checking the header refuses every legitimate
+    join while protecting nothing.
+
+    What authorizes this instead is the same per-escalation token as the other
+    door, plus two things the direct door doesn't have: the presigned URL,
+    which only the portal-context Lambda's role can mint and only for someone
+    who already proved they hold that token, and that Lambda's own CORS — which
+    is where a browser's origin genuinely is enforced, at the only step a
+    hostile page would have to get through first.
     """
     call_id = str(attach.get("call") or "")
     token = str(attach.get("token") or "")
-
-    origin = websocket.headers.get("origin")
-    # Advisory here, unlike portal_ws, where it's mandatory: whether Runtime
-    # forwards a browser's Origin through the signed handshake isn't this
-    # code's to decide, and refusing a connection for a header that simply
-    # never arrived would break every join. So it's enforced when present and
-    # skipped when absent — the presigned URL and the token are what actually
-    # gate this path, and neither is something a hostile page can obtain.
-    if origin is not None and not origin_allowed(origin):
-        print(f"[handoff] refused portal attach from origin {origin!r} "
-              f"(allowed: {PORTAL_ALLOWED_ORIGINS})")
-        await websocket.close(code=4403)
-        return
 
     call = _authorized(call_id, token)
     if call is None:
@@ -841,6 +838,9 @@ async def serve_portal_socket(websocket: WebSocket, attach: dict[str, Any]) -> N
             })
         except Exception:
             pass
+        # 4403 as well as the message: a frame sent immediately before a close
+        # is not guaranteed to arrive through Runtime's proxy, and the close
+        # code always does — so the page can explain itself either way.
         await websocket.close(code=4403)
         return
 

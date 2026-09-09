@@ -358,17 +358,20 @@ a credential, not just a transcript.
 
 Its role needs `AWSLambdaBasicExecutionRole` plus `dynamodb:GetItem` on the
 escalations table, `bedrock-agentcore:ListEvents` on the memory resource (and
-the memory ARN with `/*`), and — only for the join URL —
-`bedrock-agentcore:InvokeAgentRuntime` on the runtime:
+the memory ARN with `/*`), and — only for the join URL — this:
 
 ```json
 {"Sid":"PresignAJoinOntoTheAgentRuntime","Effect":"Allow",
- "Action":"bedrock-agentcore:InvokeAgentRuntime",
+ "Action":"bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream",
  "Resource":["arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>",
              "arn:aws:bedrock-agentcore:<region>:<account>:runtime/<runtime-id>/*"]}
 ```
 
-Without it the records still work; the portal shows why Join is unavailable.
+**Not `InvokeAgentRuntime`.** That action authorizes `/invocations`; the
+WebSocket path is a separate action, and a URL presigned with only
+`InvokeAgentRuntime` is refused with a bare `HTTP 403` at the handshake — which
+reads as a signing problem, not a missing permission. Without the right grant
+the records still work and the portal shows why Join is unavailable.
 
 **A front door.** A public Lambda Function URL is the obvious choice and may be
 blocked: an org guardrail can make one 403 at request time even with a correct
@@ -421,6 +424,14 @@ reported in the container's log per call:
   `runtime session: unknown` will serve records and refuse joins.
 - the escalations row must carry `portalRuntimeSessionId`, which needs the
   `UpdateItem` above.
+
+One thing worth knowing before adding an origin check to that path: Runtime
+terminates the browser's WebSocket and opens its own to the container, carrying
+its own `Origin` (`https://cell01.<region>.prod.arp.kepler-analytics.aws.dev`).
+The browser's origin is never visible there, so checking it refuses every
+legitimate join and protects nothing. `PORTAL_ALLOWED_ORIGINS` still governs
+the direct `/portal/ws/{call_id}` route, where the header is the browser's;
+on this path the presigned URL, the token, and the Lambda's CORS are the gate.
 
 ## Local testing before any of this
 

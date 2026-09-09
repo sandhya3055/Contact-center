@@ -46,11 +46,17 @@ build step is needed — but if your packaging tool preserves symlinks, replace
 it with a copy of agentcore_app/portal_context.py.
 
 Required execution role permissions:
-    dynamodb:GetItem                     on the escalations table
-    bedrock-agentcore:ListEvents         on the memory resource
-    bedrock-agentcore:InvokeAgentRuntime on the agent runtime (for the join URL
-                                         only — without it everything else
-                                         still works, read-only)
+    dynamodb:GetItem              on the escalations table
+    bedrock-agentcore:ListEvents  on the memory resource
+    bedrock-agentcore:InvokeAgentRuntimeWithWebSocketStream
+                                  on the agent runtime — for the join URL only;
+                                  without it everything else still works and the
+                                  portal is read-only. Note it is *not*
+                                  InvokeAgentRuntime: that action covers
+                                  /invocations, and a presigned /ws signed with
+                                  only that grant is refused with a bare HTTP
+                                  403 at the handshake, which looks like a bad
+                                  signature rather than a missing permission.
 
 Required environment variables:
     ESCALATIONS_TABLE   — the escalations table name (default "escalations")

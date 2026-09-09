@@ -998,12 +998,18 @@ function openSocket(url, attachFrame) {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     // Closed before the call was ever confirmed: nothing was lost, this page
     // simply never had a live call — say that instead of "connection lost".
     if (!proven) {
-      proveOrGiveUp('Couldn’t open a line to the call. It may have ended, or the join '
-        + 'link may have expired — reload to get a fresh one.');
+      // 4403 is the agent's own refusal, and it survives the proxy even when
+      // the explanatory frame it sends first doesn't. Anything else at this
+      // point is the connection never having got that far.
+      proveOrGiveUp(event.code === 4403
+        ? 'The agent didn’t recognise this call — it may have ended, or the link’s token '
+          + 'may not match. Ask for a fresh escalation link in Slack.'
+        : 'Couldn’t open a line to the call. It may have ended, or the join link may '
+          + 'have expired — reload to get a fresh one.');
       return;
     }
     topStatus.className = 'status ended';
