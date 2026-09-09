@@ -10,14 +10,18 @@ What this adds to a call that strands_agent.py is already running:
    exactly this call: the full transcript, the escalation reason, and a
    **Join call** button. The portal is live -- new transcript lines arrive as
    they're spoken, and the human hears the call from the moment they open it.
-3. Joining bridges audio both ways and takes Ava off the line: the caller's
-   mic stops being fed to Nova Sonic and is relayed to the human's browser
-   instead, the human's mic is relayed to the caller, and anything Ava tries
-   to say is dropped. Leaving hands the call back to Ava.
+3. Joining bridges audio both ways and takes Ava off the call entirely: her
+   Nova Sonic session is torn down (strands_agent.py does it, on the signal
+   this module sends), the caller's mic is relayed to the human's browser
+   instead of to the model, and the human's mic is relayed to the caller. From
+   that point the human is the only voice on the line — there is no model left
+   listening to what the caller tells a person, and none that can start
+   speaking over them. Leaving therefore doesn't hand the call back to Ava;
+   it puts the caller back in the queue for another human.
 
     caller browser <-- audio --> /ws  <-- audio -->  /portal/ws  <-- --> human browser
                                   |
-                                  +-- Nova Sonic (starved of input while a human is on)
+                                  +-- Nova Sonic (disconnected once a human joins)
 
 Two doors, one bridge. `/portal/ws/{call_id}` above is the direct one, used
 whenever the human's browser can reach this process as an ordinary origin — a
@@ -170,6 +174,13 @@ class LiveCall:
         self.join_token: str | None = None
         self.human_label: str | None = None
 
+        # Who the caller says they are, from the pre-call form in
+        # frontend/index.html (validated there and again in strands_agent.py
+        # before either ever reaches here). Shown to whoever picks the call up
+        # so they open with the caller's name instead of asking for it again.
+        self.caller_name: str | None = None
+        self.caller_dob: str | None = None
+
         # How this call is keyed in AgentCore Memory, so the portal can read
         # the conversation back from the durable record rather than only from
         # this process's transcript list. Set by strands_agent.py once the
@@ -194,6 +205,17 @@ class LiveCall:
         self.portals: set[WebSocket] = set()
         self.human_socket: WebSocket | None = None
 
+        # How to take the AI off this call when a human takes it over, set by
+        # strands_agent.py — the only place that holds the model session. A
+        # plain synchronous signal rather than a coroutine on purpose: the
+        # teardown belongs to the task that owns that session, and the human
+        # who just pressed Join must not be left waiting on it.
+        self.request_ai_disconnect: Callable[[], None] | None = None
+        # Flipped once that session is really gone, by mark_ai_disconnected.
+        # What it changes is where the call goes if the human then leaves:
+        # there is no AI left to hand it back to.
+        self.ai_disconnected = False
+
         # The in-flight Slack notification, parked here so asyncio doesn't
         # garbage-collect a task nothing else holds a reference to.
         self.slack_task: asyncio.Task | None = None
@@ -217,11 +239,14 @@ class LiveCall:
             "call_id": self.call_id,
             "state": self.state,
             "mobile_number": self.mobile_number,
+            "caller_name": self.caller_name,
+            "caller_dob": self.caller_dob,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "escalation": self.escalation,
             "transcript": self.transcript,
             "human_label": self.human_label,
+            "ai_disconnected": self.ai_disconnected,
             "watchers": len(self.portals),
             "memory": {"actor_id": self.memory_actor_id, "session_id": self.memory_session_id},
         }
@@ -387,7 +412,7 @@ class LiveCall:
             await self.push_state()
 
     async def join_human(self, socket: WebSocket, label: str | None) -> None:
-        """Put a human on the line and take Ava off it."""
+        """Put a human on the line and take Ava off the call for good."""
         if self.state == STATE_ENDED:
             await self._send(socket, {"type": "error", "message": "This call has already ended."})
             return
@@ -398,6 +423,22 @@ class LiveCall:
         self.human_socket = socket
         self.human_label = (label or "").strip()[:60] or "a specialist"
         self.state = STATE_HUMAN
+
+        # Ava doesn't just go quiet — she comes off the call. Flipping the
+        # state above is what stops her audio reaching the caller (the gates
+        # in strands_agent.py read it on every frame), and this asks the task
+        # that owns her Nova Sonic session to end it, which is what makes the
+        # human the only voice on the line rather than merely the louder one.
+        #
+        # Signalled, not awaited: that teardown is the call task's to do, and
+        # a human who has just pressed Join shouldn't be held up by it. It
+        # reports back through mark_ai_disconnected when it's done.
+        if self.request_ai_disconnect is not None:
+            try:
+                self.request_ai_disconnect()
+            except Exception as exc:
+                print(f"[handoff] couldn't ask the AI to leave {self.call_id}: {exc}")
+
         await self.push_state()
         await self.to_customer({
             "type": "bidi_handoff",
@@ -406,8 +447,15 @@ class LiveCall:
         })
         print(f"[handoff] {self.human_label} joined call {self.call_id}")
 
+    async def mark_ai_disconnected(self) -> None:
+        """Ava's session is really gone — called by strands_agent.py once the
+        teardown join_human asked for has actually finished."""
+        self.ai_disconnected = True
+        await self.push_state()
+
     async def release_human(self, socket: WebSocket, reason: str = "left") -> None:
-        """Hand the call back to Ava."""
+        """Take the human off the line — back to the queue, or back to Ava if
+        she was never disconnected (see the branch below)."""
         if self.human_socket is not socket:
             return
         self.human_socket = None
@@ -415,7 +463,16 @@ class LiveCall:
         self.human_label = None
         if self.state != STATE_ENDED:
             self.state = STATE_ESCALATED
-            await self.to_customer({"type": "bidi_handoff", "state": STATE_AI})
+            # Where the caller goes depends on whether there's still an AI to
+            # go back to. Once a human has joined there isn't: that join tore
+            # the model session down, so the honest thing to tell the caller
+            # is that they're waiting for another person — not that Ava is
+            # back, which would leave them talking to nobody.
+            await self.to_customer({
+                "type": "bidi_handoff",
+                "state": STATE_ESCALATED if self.ai_disconnected else STATE_AI,
+                "ai_available": not self.ai_disconnected,
+            })
         await self.push_state()
         print(f"[handoff] {label} {reason} call {self.call_id}")
 
@@ -534,7 +591,8 @@ def _slack_blocks(call: LiveCall, portal_url: str) -> list[dict[str, Any]]:
     note = str(details.get("note") or "").strip()
     fields = [
         {"type": "mrkdwn", "text": f"*Reason*\n{reason}"},
-        {"type": "mrkdwn", "text": f"*Caller*\n{call.mobile_number or 'not provided'}"},
+        {"type": "mrkdwn", "text": f"*Caller*\n{call.caller_name or 'name not provided'}"},
+        {"type": "mrkdwn", "text": f"*Number*\n{call.mobile_number or 'not provided'}"},
     ]
     for key, value in details.items():
         if key in {"reason", "note"} or value in (None, ""):
@@ -564,7 +622,8 @@ def _slack_blocks(call: LiveCall, portal_url: str) -> list[dict[str, Any]]:
             "elements": [{
                 "type": "mrkdwn",
                 "text": f"The caller is still on the line · call `{call.call_id}` · "
-                        "opening the portal lets you listen before you join",
+                        "opening the portal lets you listen before you join, and "
+                        "joining disconnects Ava",
             }],
         },
     ]

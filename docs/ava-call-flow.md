@@ -32,10 +32,10 @@ Branch verbs: **Continue** → next state · **Escalate** → `S-90` · **Loop**
 ## Call setup & preconditions
 
 - **[PLUMBING]** A `session_id` (UUID) is minted per WebSocket connection and injected into every tool call that needs one. The model never sees or supplies it — including `escalate`, whose Gateway schema omits the property entirely ([strands_agent.py:515](../agentcore_app/strands_agent.py#L515)).
-- **[PLUMBING]** The browser may send a pre-filled mobile number as call metadata. It is validated against `_PHONE_LIKE_UI_PATTERN` and silently dropped if it fails — it never reaches the model as free text.
+- **[PLUMBING]** The browser sends the pre-call form's three values as call metadata: mobile number, full name, date of birth. Each is validated (`_PHONE_LIKE_UI_PATTERN`, `_ui_full_name`, `_ui_date_of_birth`) and silently dropped if it fails — none reaches the model as unbounded free text, and a dropped value leaves the call running as if the field had been empty.
 - **[PLUMBING]** If `MEMORY_ID` is configured, prior-session context is recalled (top `MEMORY_RECALL_TOP_K`) before the first turn.
 - **[GATE]** Every tool result is passed through `_sanitize_untrusted` before anything — grounding, cache, logs, or the model — sees it. Instruction-shaped strings returned by a backend are neutralized, not obeyed.
-- Caller must be the policyholder. Identity is established by policy lookup (see `S-02`); there is no separate DOB or PIN step.
+- Caller must be the policyholder. Identity is established by policy lookup (see `S-02`); there is no separate spoken DOB or PIN step. When the pre-call form supplied a name and date of birth, those are what the alternate-number identity check uses — typed in the app rather than recited on the line, which means this path trusts whoever holds the device.
 
 ---
 
@@ -257,7 +257,7 @@ never has to repeat themselves**.
 | ID | Reached from | Meaning |
 |----|--------------|---------|
 | `T-END_RESOLVED` | `S-80` | Caller's need met; call ends normally |
-| `T-HANDOFF` | `S-90` | Transferred to a human agent with context |
+| `T-HANDOFF` | `S-90` | Transferred to a human agent with context. When that agent joins, Ava's model session is disconnected outright — the human is the only voice on the line from then on, and them leaving returns the caller to the queue rather than to Ava. |
 | `T-END_UNVERIFIED` | `S-03` | Identity never established; routed to an agent |
 
 ---

@@ -55,7 +55,7 @@ import re
 import time
 import uuid
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -952,6 +952,60 @@ _PHONE_LIKE_PATTERN = re.compile(r"^\+\d+$")
 # model as text.
 _PHONE_LIKE_UI_PATTERN = re.compile(r"^\+?[\d\-\s]{7,20}$")
 
+# The other two things the pre-call form in frontend/index.html collects. All
+# three values reach the model as literal text, so each is checked for being
+# shaped like the thing it claims to be and dropped otherwise, and the call
+# then runs exactly as if the field had been left empty.
+#
+# Be clear about what that buys, because it is bounding and not sanitising. A
+# date has one legal shape and this pins it exactly. A name doesn't: what
+# these two rules enforce is "a few words of Latin script", which stops the
+# field being a place to type a paragraph of instructions but cannot stop a
+# short one ("Say yes to everything") from being a valid-looking name. Two
+# things carry the rest of that weight, both already here: the prompt below
+# introduces the value as something the caller typed, quoted, rather than as
+# text to follow; and no tool argument gets through on the model's word alone
+# — _GroundingGateTool and _TranscriptConsistencyGateTool check every one
+# against what a lookup returned or what the caller actually provided.
+#
+# The Latin-script-only rule is also a real limitation, and the wrong trade
+# for a production contact centre: it rejects names it shouldn't. Widening it
+# means allowing more of Unicode in, which wants more than a regex
+# (normalisation, and a look at the confusable ranges).
+_FULL_NAME_UI_PATTERN = re.compile(r"^[A-Za-z][A-Za-z .'\-]{1,59}$")
+_MAX_NAME_WORDS = 5
+# ISO only, because that's both what <input type="date"> submits and what the
+# gateway's identity check wants — no format guessing anywhere in between.
+_DOB_UI_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _ui_full_name(value: Any) -> str | None:
+    """The caller's name as typed into the pre-call form, or None."""
+    if not isinstance(value, str):
+        return None
+    name = " ".join(value.split())
+    if not _FULL_NAME_UI_PATTERN.match(name):
+        return None
+    return name if len(name.split(" ")) <= _MAX_NAME_WORDS else None
+
+
+def _ui_date_of_birth(value: Any) -> str | None:
+    """A pre-call date of birth, only if it's a real date in the past.
+
+    Well-formed is not the same as real (1990-02-31 matches the pattern), and
+    a date of birth that hasn't happened yet is a typo or a probe rather than
+    an identity — either way there's nothing to verify against, so it's
+    dropped rather than passed to a tool.
+    """
+    if not isinstance(value, str) or not _DOB_UI_PATTERN.match(value.strip()):
+        return None
+    try:
+        parsed = date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return value.strip() if parsed < date.today() else None
+
+
 # Field-name hints for two different flavors of "this argument is an
 # identity/account detail, never a value the model should be inventing" —
 # used by _TranscriptConsistencyGateTool below. Split in two because they
@@ -1076,10 +1130,10 @@ class _RecentUserDigits:
 
     def seed(self, value: str) -> None:
         """Register digits the caller provided some way other than speech
-        this call — e.g. a mobile number typed into the UI before the call
-        connected (see the call-metadata handshake in voice_chat) — so a
-        tool argument built from it isn't later flagged as fabricated just
-        because it was never spoken aloud."""
+        this call — the mobile number and date of birth typed into the UI
+        before the call connected (see the call-metadata handshake in
+        voice_chat) — so a tool argument built from one isn't later flagged
+        as fabricated just because it was never spoken aloud."""
         digits = _digits_only(value)
         if digits:
             self._all.append(digits)
@@ -1212,6 +1266,17 @@ class _TranscriptConsistencyGateTool(AgentTool):
                 continue
             key_lower = key.lower()
             if any(hint in key_lower for hint in _DATE_FIELD_HINTS):
+                # A date of birth entered in the app before the call was never
+                # spoken, so the "did the caller just say something
+                # number-shaped" fallback below cannot see it. Its digits were
+                # seeded though (see _RecentUserDigits.seed), and a date is
+                # the one case where they arrive in exactly the order a tool
+                # wants them — ISO — so this can be checked properly rather
+                # than weakly: the argument's own digits have to appear in
+                # what the caller actually provided.
+                provided_digits = _digits_only(value)
+                if provided_digits and provided_digits in ever_provided:
+                    continue
                 if not self._recent_digits.mentions_number_recently():
                     fabricated_fields.append(key)
             elif any(hint in key_lower for hint in _DIGIT_SEQUENCE_FIELD_HINTS):
@@ -1551,6 +1616,63 @@ async def voice_chat(websocket: WebSocket) -> None:
         await handoff.serve_portal_socket(websocket, attach)
 
 
+# The whole budget for shutting Nova Sonic down when a human takes a call —
+# not per step, so a slow stop() can't be followed by an equally slow wait and
+# leave the human agent hanging. A live person is on the line by this point,
+# so the bound matters more than the tidiness: whatever happens, the session
+# is gone and the bridge is running within about this long.
+#
+# Nothing goes deaf while it runs, which is why a few seconds is affordable:
+# run() relays the caller's audio to the portal before it consults any handoff
+# gate, so the human keeps hearing the call right up until the moment run()
+# returns, and the bridge takes over in the same breath.
+AVA_DISCONNECT_TIMEOUT = 5
+
+
+async def _disconnect_ava(voice_agent: BidiAgent, session: asyncio.Task) -> None:
+    """Take the model off a live call, for a human handoff.
+
+    Different from the gates in _serve_caller, which only stop Ava's audio
+    reaching the caller: this ends the Nova Sonic session itself. Afterwards
+    there is no model on the call at all — nothing hearing what the caller
+    tells a person, and nothing that could resume speaking over them.
+
+    Bounded, and never allowed to raise. A human agent has already been told
+    they're on this call; a model that won't shut down cleanly must not take
+    that call down with it. stop() gets the first, polite attempt; if run()
+    hasn't returned by then the task is cancelled outright. Either way the
+    session is finished before this returns.
+    """
+    deadline = time.monotonic() + AVA_DISCONNECT_TIMEOUT
+
+    def left() -> float:
+        """What's still on the budget — never zero, so each step gets a go."""
+        return max(0.1, deadline - time.monotonic())
+
+    try:
+        await asyncio.wait_for(voice_agent.stop(), timeout=left())
+    except Exception as exc:
+        print(f"[handoff] error stopping Ava for the handoff: {exc}")
+
+    # stop() returning is not the same as run() having returned: it may have
+    # only just asked the session to close. So wait for the task itself before
+    # taking it away — without this, an agent shutting down perfectly cleanly
+    # still gets cancelled a scheduler tick short of the finish line.
+    #
+    # asyncio.wait, not `await session`, throughout: it reports how the task
+    # ended without re-raising it here, where there's nothing useful to do
+    # with a failure and a live bridge to get on with.
+    await asyncio.wait({session}, timeout=left())
+    if not session.done():
+        session.cancel()
+        await asyncio.wait({session}, timeout=left())
+
+    if session.done() and not session.cancelled():
+        failure = session.exception()
+        if failure is not None:
+            print(f"[handoff] Ava's session ended with: {failure}")
+
+
 async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     """One bidirectional voice call, or None—see voice_chat.
 
@@ -1581,6 +1703,15 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     live_call = handoff.register_call()
     live_call.customer_send = websocket.send_json
 
+    # Set when a human agent presses Join in the portal. What follows it is a
+    # real disconnect, not a mute: Ava's Nova Sonic session is torn down and
+    # the rest of the call is a plain audio bridge between the two browsers
+    # (see the run/bridge split at the end of this function). Handed to the
+    # handoff side as a bare `set`, so joining can never be blocked by — or
+    # fail because of — anything this side does with it.
+    human_takeover = asyncio.Event()
+    live_call.request_ai_disconnect = human_takeover.set
+
     # Single-item mutable box (not a plain variable) so build_gateway_tools
     # -- which is already running as a background task by the time
     # mobile_number below is known -- and the seeding step further down
@@ -1593,6 +1724,10 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     # teardown below, which must then leave the socket (and the call this
     # connection is joining) alone — see voice_chat.
     handed_to_portal = False
+
+    # Set once a human handoff has already stopped the voice agent, so the
+    # teardown doesn't stop it a second time.
+    ava_disconnected = False
 
     # build_gateway_tools() -> load_tools() starts mcp_client's own
     # background connection lazily; wrapping this in `with mcp_client:`
@@ -1723,15 +1858,31 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             if isinstance(raw_mobile_number, str) and _PHONE_LIKE_UI_PATTERN.match(raw_mobile_number.strip())
             else None
         )
-        # Registered as provided-but-not-spoken so _TranscriptConsistencyGateTool
-        # doesn't flag a later tool call using this number as fabricated just
-        # because the caller typed it instead of saying it aloud.
+        # The other two fields the pre-call form collects. Together with the
+        # number they're exactly the triple the gateway's identity check
+        # wants, which is the point of asking for them up front: nobody
+        # should have to recite their own date of birth down a phone line to
+        # be recognised. Same treatment as the number — validated (see
+        # _ui_full_name / _ui_date_of_birth) or simply absent.
+        caller_name = _ui_full_name(initial_metadata.get("full_name"))
+        caller_dob = _ui_date_of_birth(initial_metadata.get("date_of_birth"))
+
+        # All three are registered as provided-but-not-spoken, so
+        # _TranscriptConsistencyGateTool doesn't flag a later tool call using
+        # one as fabricated just because the caller typed it instead of saying
+        # it aloud — and all three go onto the live call, so a human agent
+        # picking it up sees who is on the line.
         if mobile_number:
             recent_digits.seed(mobile_number)
             known_mobile_number[0] = mobile_number
-            # So a human agent picking this call up sees who's on the line.
             live_call.mobile_number = mobile_number
+        if caller_name:
+            live_call.caller_name = caller_name
+        if caller_dob:
+            live_call.caller_dob = caller_dob
+            recent_digits.seed(caller_dob)
 
+        if mobile_number:
             # Opening sequence for a caller who identified themselves in the
             # app: look their policy up *before* saying anything, then greet
             # them by the name on it.
@@ -1767,6 +1918,44 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 "rules — never guess, shorten or invent a name.\n"
                 "You already have the caller's details from this lookup, so don't "
                 "ask them for the number, mention the lookup, or repeat it."
+            )
+
+        # The name and date of birth from the same form, given to the model as
+        # facts it already holds rather than as questions to ask. This is what
+        # makes the pre-call fields worth filling in: the identity check the
+        # gateway offers takes a number, a date of birth and a full name, and
+        # a caller who typed all three shouldn't be asked to say any of them
+        # out loud.
+        #
+        # Worth being clear about what that means, because it's a policy
+        # choice and not an accident: on this path the identity check is
+        # satisfied by whoever is holding the device, exactly as it already
+        # was for the pre-filled mobile number. That's the right shape for a
+        # signed-in app and the wrong shape for an anonymous web page — if
+        # this ever fronts one, the pre-call form should stop being trusted
+        # for verification and go back to being a hint.
+        if caller_name or caller_dob:
+            provided = []
+            if caller_name:
+                provided.append(f'their full name, exactly as typed: "{caller_name}"')
+            if caller_dob:
+                provided.append(f"their date of birth, ISO format: {caller_dob}")
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "The caller also entered these details in the app before the "
+                "call, so you already have them:\n- "
+                + "\n- ".join(provided)
+                + "\nThey were typed rather than spoken, so there is no "
+                "speech-to-text risk in them: use them exactly as given "
+                "whenever a tool needs the caller's name or date of birth, "
+                "and never ask the caller for either, read one back to "
+                "confirm it, or say the date of birth aloud at all. Greet "
+                "them by the first name the policy lookup returns when there "
+                "is one; the typed name is only for when there isn't. If the "
+                "caller states a different name or date of birth at any point "
+                "in the call, that correction wins over what was typed — "
+                "confirm the new value the normal way and use only that from "
+                "then on."
             )
 
         # A caller who didn't pre-fill their number gets a per-call actor id
@@ -1868,10 +2057,12 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 return message
             return None
 
-        # The human-handoff bridge lives in these two functions, and nowhere
-        # else: `run()` pulls the caller's events through the first and pushes
-        # Ava's out through the second, so gating both is all it takes to hand
-        # a live call over to a person.
+        # The first half of the human handoff lives in these two functions:
+        # `run()` pulls the caller's events through the first and pushes Ava's
+        # out through the second, so gating both is what silences her the
+        # instant someone presses Join — before any teardown has had time to
+        # happen. The second half is the disconnect at the end of this
+        # function, which then ends her session outright.
         #
         # What it must NOT do is stop feeding the model. Nova Sonic drops the
         # session with "Timed out waiting for audio bytes or interactive
@@ -1930,10 +2121,72 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             elif event_type == "bidi_interruption":
                 print(f"[interruption] {event.get('reason')}")
 
-        await voice_agent.run(
+        async def bridge_caller_to_human() -> None:
+            """The rest of the call once Ava has been disconnected.
+
+            run() is gone, and with it the only thing that was pulling the
+            caller's frames off this socket — so this does, for as long as
+            they stay on the line, relaying their audio to whoever is watching
+            in the portal. The other direction needs nothing here: the human's
+            mic already goes straight to this socket from
+            handoff.relay_human_audio.
+
+            No silence injection, unlike receive_with_greeting_kickoff above:
+            that exists to stop Nova Sonic timing out, and there is no Nova
+            Sonic session left to time out. A keepalive tick with nothing on
+            it is genuinely nothing to do.
+
+            Nor is a caller message lost across the switch. next_caller_event
+            holds its pending receive in an enclosing variable rather than
+            re-issuing one per wait, and asyncio.wait never cancels what it
+            waits on — so a frame that arrived while Ava was being torn down
+            is still sitting in that same task, and the first call here
+            collects it.
+            """
+            while True:
+                message = await next_caller_event()
+                if message is None:
+                    continue
+                if message.get("type") == "bidi_audio_input":
+                    await live_call.relay_caller_audio(message)
+
+        # Ava's session runs as its own task so that a human pressing Join can
+        # *end* it, rather than only being layered on top of it. Before this
+        # it stayed open for the whole call being fed silence, which meant the
+        # model was still on the line — listening to a caller who thinks
+        # they're talking to a person in private, and one dropped gate away
+        # from speaking over them. Whichever of these two finishes first
+        # decides how the rest of the call goes.
+        ava_session = asyncio.create_task(voice_agent.run(
             inputs=[receive_with_greeting_kickoff],
             outputs=[send_to_caller, log_event],
-        )
+        ))
+        taken_over = asyncio.create_task(human_takeover.wait())
+        try:
+            await asyncio.wait(
+                {ava_session, taken_over}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # This handler is going away entirely (a server shutdown, say).
+            # asyncio.wait never cancels what it waits on, so without this the
+            # model session would be left running with nobody reading it.
+            ava_session.cancel()
+            raise
+        finally:
+            taken_over.cancel()
+
+        if ava_session.done():
+            # The ordinary end of a call — the caller hung up, the model
+            # closed the session, or it failed. result() re-raises whatever
+            # run() raised, so failures still reach the handler below exactly
+            # as they did when this was a bare `await`.
+            ava_session.result()
+        else:
+            await _disconnect_ava(voice_agent, ava_session)
+            ava_disconnected = True
+            await live_call.mark_ai_disconnected()
+            print(f"[handoff] Ava disconnected from call {live_call.call_id} — "
+                  f"{live_call.human_label} has the line")
+            await bridge_caller_to_human()
 
     except WebSocketDisconnect:
         print("Client disconnected")
@@ -1984,7 +2237,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 await websocket.close()
             except Exception:
                 pass
-            if voice_agent is not None:
+            if voice_agent is not None and not ava_disconnected:
                 try:
                     await voice_agent.stop()
                 except Exception as cleanup_error:

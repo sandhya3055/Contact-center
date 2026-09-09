@@ -305,12 +305,13 @@
       <div class="card-body">
         <div class="on-air" id="onAir" hidden>
           <span class="rec"></span>
-          <span>You’re on the call — Ava is off the line</span>
+          <span>You’re on the call — Ava has been disconnected</span>
         </div>
 
         <p class="join-note" id="joinNote">
           You can hear the call now. Joining puts you through to the caller and
-          takes Ava off the line.
+          ends Ava’s session — she leaves the call rather than waiting in the
+          background, so it’s yours until the caller hangs up.
         </p>
 
         <div id="joinBlock">
@@ -812,6 +813,8 @@ function renderCall(call, isFirst) {
   // Every field the escalate tool was called with, plus what we know about the
   // call — rendered generically so a new tool argument shows up on its own.
   const rows = [
+    ['Caller name', call.caller_name || 'not provided', false],
+    ['Date of birth', call.caller_dob || 'not provided', false],
     ['Caller number', call.mobile_number || 'not provided', true],
     ['Call started', fmtTime(call.started_at), false],
   ];
@@ -874,7 +877,10 @@ function renderCall(call, isFirst) {
   } else if (someoneElseOn) {
     joinNote.textContent = `${call.human_label || 'Another agent'} is on this call. You can listen in.`;
   } else if (iAmOn) {
-    joinNote.textContent = 'The caller hears you directly. Ava will not speak while you’re on the line.';
+    joinNote.textContent = call.ai_disconnected
+      ? 'The caller hears you directly. Ava has left the call — leaving puts the '
+        + 'caller back in the queue for another agent, not back to her.'
+      : 'The caller hears you directly. Ava is being disconnected now.';
   }
 
   transcriptFoot.textContent = iAmOn
