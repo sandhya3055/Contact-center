@@ -439,7 +439,7 @@
   .precall { margin-top: 22px; text-align: left; }
   label { display: block; font-size: 12px; font-weight: 650; color: var(--text-muted); margin-bottom: 6px; }
   .field { margin-bottom: 14px; }
-  input[type="text"], input[type="tel"] {
+  input[type="text"], input[type="tel"], input[type="date"] {
     width: 100%; padding: 11px 13px; font: inherit; font-size: 14px;
     border: 1px solid var(--border); border-radius: 10px;
     background: var(--surface-alt); color: inherit;
@@ -665,7 +665,7 @@
       </div>
       <div class="step">
         <h3>We know who you are</h3>
-        <p>Add your registered mobile number and Ava skips the identity questions.</p>
+        <p>Your name, date of birth and registered mobile number are all we ask, and they’re why Ava skips the identity questions.</p>
       </div>
       <div class="step">
         <h3>Say what you need</h3>
@@ -689,11 +689,11 @@
     <div class="faq">
       <details open>
         <summary>Am I speaking to a real person?</summary>
-        <div class="answer">No — Ava is an AI voice assistant, and she says so when she picks up. Ask for a human at any point in the call and she'll escalate to a specialist along with a summary of what you've already told her.</div>
+        <div class="answer">No — Ava is an AI voice assistant, and she says so when she picks up. Ask for a human at any point in the call and she'll escalate to a specialist along with a summary of what you've already told her. When that specialist picks up, Ava leaves the call entirely — from then on you're speaking only to the person.</div>
       </details>
       <details>
         <summary>Do I need my policy number ready?</summary>
-        <div class="answer">No — your registered mobile number is all we ask for, and it's enough to find your policy. Ava looks it up before she says hello, so she opens by name and never makes you read numbers out loud. If the number you give isn't the registered one, she'll check who you are another way.</div>
+        <div class="answer">No — the three details you enter before the call are enough to find your policy. Ava looks it up before she says hello, so she opens by name and never makes you read your number or date of birth out loud. If the number you give isn't the registered one, your name and date of birth are what she checks you against instead.</div>
       </details>
       <details>
         <summary>Can I mute myself mid-call?</summary>
@@ -798,8 +798,20 @@
       <!-- pre-call: shown while not on a call -->
       <div class="precall" id="precall">
         <div class="field">
+          <label for="fullName">Full name</label>
+          <input id="fullName" type="text" autocomplete="name" placeholder="e.g. Priya Sharma">
+          <p id="nameHint" class="hint">As it appears on your policy.</p>
+        </div>
+
+        <div class="field">
+          <label for="dateOfBirth">Date of birth</label>
+          <input id="dateOfBirth" type="date" autocomplete="bday" max="">
+          <p id="dobHint" class="hint">Checked against your policy so Ava never asks you for it on the call.</p>
+        </div>
+
+        <div class="field">
           <label for="mobileNumber">Registered mobile number</label>
-          <input id="mobileNumber" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. +91 98765 43210">
+          <input id="mobileNumber" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. +61 412 345 678">
           <p id="mobileHint" class="hint">Lets Ava pull up your policy without asking you to read it out.</p>
         </div>
 
@@ -865,14 +877,32 @@ const transcriptEl = document.getElementById('transcript');
 const controls = document.getElementById('controls');
 const mobileInput = document.getElementById('mobileNumber');
 const mobileHint = document.getElementById('mobileHint');
+const nameInput = document.getElementById('fullName');
+const nameHint = document.getElementById('nameHint');
+const dobInput = document.getElementById('dateOfBirth');
+const dobHint = document.getElementById('dobHint');
 const configHint = document.getElementById('configHint');
 const agentNameEl = document.getElementById('agentName');
 const agentRoleEl = document.getElementById('agentRole');
 
 const MOBILE_HINT_DEFAULT = mobileHint.textContent;
+const NAME_HINT_DEFAULT = nameHint.textContent;
+const DOB_HINT_DEFAULT = dobHint.textContent;
 const MOBILE_PATTERN = /^\+?[\d\-\s]{7,20}$/;
+// Latin script, the punctuation that turns up inside real names, and a few
+// words at most. Kept in step with _FULL_NAME_UI_PATTERN and _MAX_NAME_WORDS
+// in agentcore_app/strands_agent.py, which check the same thing again on
+// arrival — this side exists only so the caller finds out before they're on a
+// call rather than after.
+const NAME_PATTERN = /^[A-Za-z][A-Za-z .'\-]{1,59}$/;
+const MAX_NAME_WORDS = 5;
 
 mobileInput.value = localStorage.getItem('ava_mobile_number') || '';
+nameInput.value = localStorage.getItem('ava_full_name') || '';
+dobInput.value = localStorage.getItem('ava_date_of_birth') || '';
+// Nobody's date of birth is in the future, and the browser's own date picker
+// will say so before any of our code has to.
+dobInput.max = new Date().toISOString().slice(0, 10);
 
 // ---------------------------------------------------------------- config
 // Where a call goes is deployment config, not something a caller should be
@@ -951,6 +981,42 @@ function validateMobile() {
 }
 
 mobileInput.addEventListener('input', validateMobile);
+
+// ---------------------------------------------------------------- name, dob
+// Same three-way answer as validateMobile: a value when it's usable, false
+// when what's there is wrong, null when the field is simply empty. start()
+// treats null and false the same way — all three fields are required — but
+// keeping them apart is what lets the hint say which of the two it is.
+function validateName() {
+  const value = nameInput.value.trim().replace(/\s+/g, ' ');
+  if (!value) return setFieldState(nameInput, nameHint, NAME_HINT_DEFAULT, null);
+  if (!NAME_PATTERN.test(value) || value.split(' ').length > MAX_NAME_WORDS) {
+    return setFieldState(nameInput, nameHint,
+      'Enter your name as it appears on your policy (letters, spaces, hyphens).', false);
+  }
+  return setFieldState(nameInput, nameHint, NAME_HINT_DEFAULT, value);
+}
+
+function validateDob() {
+  const value = dobInput.value.trim();
+  if (!value) return setFieldState(dobInput, dobHint, DOB_HINT_DEFAULT, null);
+  // The input hands back YYYY-MM-DD, which is also what the identity check
+  // wants — so there's no reformatting anywhere between here and the tool.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value > dobInput.max) {
+    return setFieldState(dobInput, dobHint, 'Enter your date of birth.', false);
+  }
+  return setFieldState(dobInput, dobHint, DOB_HINT_DEFAULT, value);
+}
+
+function setFieldState(input, hint, message, result) {
+  input.classList.toggle('invalid', result === false);
+  hint.classList.toggle('error', result === false);
+  hint.textContent = message;
+  return result;
+}
+
+nameInput.addEventListener('input', validateName);
+dobInput.addEventListener('input', validateDob);
 
 let syncHintTimeout = null;
 
@@ -1288,18 +1354,37 @@ muteBtn.addEventListener('click', () => {
 // changes here — a human's voice arrives as the same `bidi_audio_stream`
 // events Ava's does — this is purely so the caller can see who they're
 // talking to instead of wondering why the voice changed.
-function applyHandoff(state, agentName) {
+function applyHandoff(event) {
+  const state = event.state;
   if (state === 'escalated') {
     setStatus('connecting', 'Finding a specialist…');
-    addSystemLine('Connecting you to a specialist — stay on the line.');
+    // Two different situations arrive as this one state, and they read very
+    // differently to whoever is holding the phone. Before anyone has joined,
+    // Ava is still there and this is a wait. After a specialist has joined
+    // and left, she isn't: joining ended her session outright
+    // (`ai_available: false`), so the caller is now waiting on a person with
+    // nobody to talk to in the meantime, and saying "stay on the line" without
+    // explaining the silence would just look broken.
+    if (event.ai_available === false) {
+      addSystemLine('The specialist has left the call. Connecting you to someone '
+        + 'else — stay on the line.');
+      agentNameEl.textContent = 'Assurio';
+      agentRoleEl.textContent = 'Waiting for a specialist';
+    } else {
+      addSystemLine('Connecting you to a specialist — stay on the line.');
+    }
     return;
   }
   if (state === 'human') {
-    const name = (agentName || 'a specialist').trim();
+    const name = (event.agent_name || 'a specialist').trim();
     agentNameEl.textContent = name;
     agentRoleEl.textContent = 'Customer care specialist · Assurio';
     setStatus('connected', 'On call');
     addSystemLine(`${name} has joined the call.`);
+    // Ava's session ends when a person takes the call, so this is the whole
+    // conversation from here — worth saying, because the caller was told at
+    // the start that they were speaking to an AI.
+    addSystemLine('Ava has left the call — you’re speaking with a person now.');
     // Live speech between two people isn't transcribed, so say so rather
     // than leaving the panel looking broken.
     addSystemLine('Transcript pauses while you speak with a person.');
@@ -1320,24 +1405,38 @@ async function start() {
     setStatus('error', 'Not configured');
     return;
   }
-  // The number is what makes the call personal: the backend looks the policy
-  // up before Ava says a word, so she can open with the caller's name. Without
-  // one there's nothing to look up and she'd open cold — so it's required here
-  // rather than optional as it used to be.
-  const mobileValidation = validateMobile();
-  if (mobileValidation === false) {
-    mobileInput.focus();
-    return;
+  // All three fields are what make the call personal, and none of them is
+  // something Ava should have to ask for out loud. The number is what she
+  // looks the policy up by before she says a word, so she can open with the
+  // caller's name; the name and date of birth are what the identity check
+  // takes on the path where a number alone isn't enough. Typed here, they
+  // never have to be recited down the line — so all three are required rather
+  // than optional.
+  const fields = [
+    [validateName(), nameInput, nameHint, 'Enter your full name as it appears on your policy.'],
+    [validateDob(), dobInput, dobHint, 'Enter your date of birth.'],
+    [validateMobile(), mobileInput, mobileHint,
+      'Enter your registered mobile number so Ava can pull up your policy.'],
+  ];
+  // Reported one at a time, top field first, so the caller is never shown
+  // three red lines at once for a form they haven't finished filling in.
+  for (const [value, input, hint, missingMessage] of fields) {
+    if (value === false) {
+      input.focus();
+      return;
+    }
+    if (!value) {
+      input.classList.add('invalid');
+      hint.textContent = missingMessage;
+      hint.classList.add('error');
+      input.focus();
+      return;
+    }
   }
-  if (!mobileValidation) {
-    mobileInput.classList.add('invalid');
-    mobileHint.textContent = 'Enter your registered mobile number so Ava can pull up your policy.';
-    mobileHint.classList.add('error');
-    mobileInput.focus();
-    return;
-  }
-  const mobileNumber = mobileValidation;
+  const [fullName, dateOfBirth, mobileNumber] = fields.map(([value]) => value);
 
+  localStorage.setItem('ava_full_name', fullName);
+  localStorage.setItem('ava_date_of_birth', dateOfBirth);
   localStorage.setItem('ava_mobile_number', mobileNumber);
 
   connectBtn.disabled = true;
@@ -1390,6 +1489,8 @@ async function start() {
       ws.send(JSON.stringify({
         type: 'bidi_call_metadata',
         ...(mobileNumber ? { mobile_number: mobileNumber } : {}),
+        ...(fullName ? { full_name: fullName } : {}),
+        ...(dateOfBirth ? { date_of_birth: dateOfBirth } : {}),
         ...(runtimeSessionId ? { runtime_session_id: runtimeSessionId } : {}),
       }));
       addSystemLine('Connected — speak into your microphone.');
@@ -1423,7 +1524,7 @@ async function start() {
         stopPlayback();
       }
       if (data.type === 'bidi_handoff') {
-        applyHandoff(data.state, data.agent_name);
+        applyHandoff(data);
       }
       if (data.type === 'bidi_call_metadata_update' && data.mobile_number) {
         // Ava confirmed a different number than what the UI pre-filled —

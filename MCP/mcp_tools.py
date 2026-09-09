@@ -11,16 +11,28 @@ directly -- see ``_tool_name``.
 Four tools, deliberately scoped down from the full BUILD_SPEC §8 tool set (Opus
 review, D103):
 
-  - ``get_policy``: read-only, wraps ``lookup_policy_by_number``. Requires both
-    ``number`` and ``dob``; results are filtered to policies whose stored ``dob``
-    matches the input, so a client can't enumerate every policy on a number without
-    also knowing the holder's date of birth. Response whitelists ``Policy`` down to
-    non-PII fields (``_POLICY_FIELDS``) -- ``dob``/``email``/``mobile_no``/
-    ``sum_insured``/``premium`` never reach an external client (the input ``dob`` is
-    used only to filter, never echoed back). Each policy also carries
-    ``open_claims`` (via ``list_claims_for_vehicle``, filtered to non-``CLOSED``) so
-    a caller/agent can see a claim already in flight before attempting
-    ``register_claim``.
+  - ``get_policy``: read-only, wraps ``lookup_policy_by_identity``. Requires all
+    three of ``number``, ``dob`` and ``full_name``, and returns only the policies
+    on that number whose stored date of birth and holder name both match, so a
+    client can't enumerate the policies on a number it merely knows. A mismatch
+    is reported identically to an unknown number (``found: false``, no policies),
+    which is what stops the tool confirming whose a number is. Response whitelists
+    ``Policy`` down to non-PII fields (``_POLICY_FIELDS``) -- ``dob``/``email``/
+    ``mobile_no``/``sum_insured``/``premium`` never reach an external client (the
+    input ``dob`` and ``full_name`` are used only to match, never echoed back).
+    Each policy also carries ``open_claims`` (via ``list_claims_for_vehicle``,
+    filtered to non-``CLOSED``) so a caller/agent can see a claim already in
+    flight before attempting ``register_claim``. Expired policies are still
+    returned (``has_active`` reports the distinction) because a renewal
+    conversation is exactly about one.
+
+    The docstring previously claimed the ``dob`` filter above while the code
+    applied none -- ``number`` alone returned every policy on it. Requiring the
+    name as well is the fix, and it is a **breaking input change**: the
+    Gateway's declared ``inputSchema`` for this tool must add ``dob`` and
+    ``full_name`` to ``properties``/``required`` in the same deployment, or the
+    model will keep sending ``number`` alone and every lookup will fail as
+    invalid input.
   - ``verify_dob``: read-only, the same DOB match ``get_policy`` performs, but
     answered on its own -- a caller/agent that has a number and a spoken date of
     birth can check whether the two belong together before asking ``get_policy``
@@ -81,7 +93,11 @@ from app.tools.claim_tools import (
     create_claim_pending,
     list_claims_for_vehicle,
 )
-from app.tools.policy_tools import lookup_policy_by_number, verify_dob_name
+from app.tools.policy_tools import (
+    lookup_policy_by_identity,
+    lookup_policy_by_number,
+    verify_dob_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +189,21 @@ def _validate_full_name(full_name: Any) -> str | None:
     return full_name.strip() or None
 
 
+def _require_full_name(full_name: Any) -> str:
+    """Validate a ``full_name`` that the tool cannot proceed without.
+
+    The lenient reading above -- blank means "not supplied" -- is right for
+    ``verify_dob``, which has a narrower check to fall back on. ``get_policy``
+    has none: a blank name would match no stored holder, so accepting it would
+    turn a malformed call into a "no policy found", and the caller would be
+    asked for a different mobile number to fix a problem the number never had.
+    """
+    name = _validate_full_name(full_name)
+    if name is None:
+        raise ValueError("invalid full_name")
+    return name
+
+
 def _policy_view(config: AppConfig, policy: Any) -> dict:
     """Whitelist a :class:`Policy` down to fields safe for an external MCP client.
 
@@ -197,13 +228,26 @@ def _claim_view(claim: Any) -> dict:
 
 
 def _get_policy(config: AppConfig, event: dict) -> dict:
+    """Look up the policies a number, date of birth and full name all agree on.
+
+    All three are required. A number on its own reaches every policy stored
+    against it, which made this readable by anyone who knew (or guessed) the
+    number; requiring the holder's date of birth and name is what makes the
+    lookup identify the caller rather than merely find them.
+
+    Nothing distinguishes "no such number" from "that number's holder has a
+    different date of birth or name" in the response: both are ``found: false``
+    with no policies. That is the point -- a mismatch must not confirm that the
+    number itself is real, or whose it is.
+    """
     number = _validate_number(event.get("number"))
-    result = lookup_policy_by_number(config, number)
-    matched = [p for p in result.policies]
+    dob = _validate_dob(event.get("dob"))
+    full_name = _require_full_name(event.get("full_name"))
+    result = lookup_policy_by_identity(config, number, dob, full_name)
     return {
-        "found": bool(matched),
-        "has_active": any(p.is_active for p in matched),
-        "policies": [_policy_view(config, p) for p in matched],
+        "found": result.found,
+        "has_active": result.has_active,
+        "policies": [_policy_view(config, p) for p in result.policies],
     }
 
 

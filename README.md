@@ -163,14 +163,23 @@ browser ── connects directly with that URL ──> agentcore_app/strands_age
   into the deployment zip or a layer — it isn't in the base Lambda runtime.
 - **`agentcore_app/handoff.py` + `portal.html`** — the human handoff: an
   escalation posts to Slack with a link to an agent portal, where a person
-  reads the conversation and joins the live call, taking Ava off the line.
+  reads the conversation and joins the live call, disconnecting Ava.
   See **Human handoff** below.
 - **`frontend/index.html`** — a single self-contained page: a customer-facing
   support site (hero, what Ava can do, how it works, FAQ) whose every
   **Call Ava** button — nav, hero dial pad, closing CTA, and the floating
   button that follows you down the page — opens the same call panel. The panel
-  asks for one thing before the call: your registered mobile number, sent as a
+  asks for three things before the call — your full name, your date of birth
+  and your registered mobile number — sent as one
   `{"type": "bidi_call_metadata", ...}` message right after the socket opens.
+  The number is what Ava looks the policy up by; the name and date of birth
+  are the pair the gateway's identity check takes on the path where a number
+  alone isn't enough, so a caller who typed them never has to recite them out
+  loud. All three are validated on both sides (`_ui_full_name` /
+  `_ui_date_of_birth` in `strands_agent.py`) and reach the model as quoted
+  facts, not as questions to ask. Worth being explicit that this makes the
+  identity check satisfiable by whoever holds the device — the right shape for
+  a signed-in app, the wrong one for an anonymous page.
   That's what lets Ava look your policy up *before* she speaks and open with
   your name (see the opening sequence below), so unlike previous versions it's
   required, not optional. Where the call goes isn't asked at all — it comes
@@ -212,7 +221,7 @@ call button is disabled and the panel says which command to run.
 
 ### The opening sequence (lookup, then greet by name)
 
-With a mobile number entered, Ava's first action on a call isn't speech — it's
+With the pre-call details entered, Ava's first action on a call isn't speech — it's
 the gateway's policy lookup for that number. Only once the result is back does
 she speak, opening with the caller's first name from the policy and
 introducing herself in the same breath ("Hello Priya, I'm Ava, your AI
@@ -221,7 +230,8 @@ Assistant. I can help with…"), then handling whatever they need.
 Two details worth knowing if you change this:
 
 - It's appended to the **system prompt** per call (`strands_agent.py`, right
-  after the mobile number is resolved), not to the kickoff text. The base
+  after the pre-call details are resolved — as is a second block naming the
+  typed name and date of birth), not to the kickoff text. The base
   prompt scripts an exact opening line, and a user-role nudge doesn't reliably
   beat that — system-level text saying which of the two openings applies does.
   It also means this keeps working when the prompt comes from Bedrock Prompt
@@ -249,7 +259,7 @@ Ava escalates ──> Slack message (reason, summary, last lines, link)
                       ▼
   caller browser <── audio ──> /ws <── audio ──> /portal/ws <── audio ──> human browser
                                  │
-                                 └─ Nova Sonic left running but starved of input
+                                 └─ Nova Sonic disconnected the moment a human joins
 ```
 
 - **`agentcore_app/handoff.py`** — the whole handoff: the per-call registry,
@@ -259,7 +269,9 @@ Ava escalates ──> Slack message (reason, summary, last lines, link)
   why it escalated, Ava's summary, every field the escalate tool was called
   with, and the conversation so far, still updating live. The human **hears
   the call from the moment they open the link** — listening before taking over
-  is the point — and **Join call** puts them through, with mute and leave.
+  is the point — and **Join call** puts them through and disconnects Ava, with
+  mute and leave. Leaving puts the caller back in the queue for another agent
+  rather than back to Ava, since her session is gone by then.
 
   Two panels read the durable records rather than trusting only what this
   process is holding, both fetched after the page opens (so neither delays it)
@@ -292,26 +304,55 @@ Ava escalates ──> Slack message (reason, summary, last lines, link)
 > the wrapper's own effect goes missing. Every wrapper here therefore does its
 > work on the `ToolResultEvent` before yielding it.
 
-**Taking Ava off the line** is two functions in `voice_chat`, not a mode flag
-threaded through the app: `run()` pulls the caller's events in through one and
-pushes Ava's out through the other, so while a human is on the call the first
-sends the caller's audio to the portal instead of the model, and the second
-drops Ava's audio and transcript. Nova Sonic keeps running rather than being
-stopped — stopping it would end `run()`, which would end the call the human
-just joined. When the human leaves, the call goes back to Ava rather than to
-dead air.
+**Ava is disconnected, not muted**, and that takes two steps rather than one,
+because they answer different questions: *how fast* and *how completely*.
 
-**It is fed silence, not nothing** (`KEEPALIVE_SECONDS`). Nova Sonic ends a
-session after ~55s without audio, with `Timed out waiting for audio bytes or
-interactive content`, and that exception ends `run()` and drops the caller
-mid-call. Three ordinary things stop the audio: a human taking over, the
-caller pressing mute (the browser then sends nothing at all), and the caller's
-tab going to the background, where the throttled main thread stops flushing
-mic frames — which is easy to trigger by opening the portal link in another
-tab of the same browser. So whenever no real caller audio is arriving, a 100ms
-frame of silence goes in its place: exactly what a live mic sends in a quiet
-room. The receive task is held across those timeouts rather than re-created,
-so a caller message arriving as one expires isn't lost.
+*Immediately*, two functions in `_serve_caller` stop her being heard — not a
+mode flag threaded through the app. `run()` pulls the caller's events in
+through one and pushes Ava's out through the other, so the instant the call's
+state flips to `human` the first sends the caller's audio to the portal
+instead of to the model and the second drops Ava's audio and transcript. This
+is what makes Join feel instant; it needs no teardown to have finished.
+
+*Then* her session actually ends. `voice_agent.run()` is started as a task
+alongside a `human_takeover` event, so whichever finishes first decides the
+rest of the call: normally `run()` (the caller hung up), but on a handoff the
+event, and then `_disconnect_ava()` stops Nova Sonic and — if `stop()` doesn't
+end `run()` within the budget — cancels it outright. From that point there is
+no model on the call at all: nothing listening to what a caller tells a
+person, and nothing that could resume speaking over them. `AVA_DISCONNECT_TIMEOUT`
+bounds the whole shutdown, and nobody goes deaf while it runs, because `run()`
+relays the caller to the portal before consulting any handoff gate.
+
+Ending `run()` used to be exactly what couldn't happen — it's what reads the
+caller's socket, so its `finally` would tear the call down under the human who
+just joined. `bridge_caller_to_human()` is what makes it safe: once Ava is
+gone it takes over reading that socket and relays the caller's audio to the
+portal for as long as they stay on the line (the human's mic already goes the
+other way, straight to the caller's socket, from `relay_human_audio`). No
+message is lost across the switch — `next_caller_event` holds its pending
+receive in an enclosing variable, and `asyncio.wait` never cancels what it
+waits on, so a frame that arrived mid-teardown is still there for the first
+read.
+
+The consequence worth knowing: **leaving no longer hands the call back to
+Ava**, because there is nothing to hand it back to. The call returns to
+`escalated` and the caller is told a specialist has left and another is
+coming — `ai_available: false` on the `bidi_handoff` event is how the page
+knows which of those two situations that state means.
+
+**While Ava is on the call, she is fed silence, not nothing**
+(`KEEPALIVE_SECONDS`). Nova Sonic ends a session after ~55s without audio,
+with `Timed out waiting for audio bytes or interactive content`, and that
+exception ends `run()` and drops the caller mid-call. Two ordinary things stop
+the audio: the caller pressing mute (the browser then sends nothing at all),
+and the caller's tab going to the background, where the throttled main thread
+stops flushing mic frames — easy to trigger by opening the portal link in
+another tab of the same browser. So whenever no real caller audio is arriving,
+a 100ms frame of silence goes in its place: exactly what a live mic sends in a
+quiet room. The receive task is held across those timeouts rather than
+re-created, so a caller message arriving as one expires isn't lost. The bridge
+after a handoff needs none of this — there's no session left to keep alive.
 
 Configure it in `.env` (all optional — with no Slack token the portal link is
 printed to the server log instead, which is enough to work locally):
@@ -572,8 +613,8 @@ open frontend/index.html
 
 The frontend detects a `ws://`/`wss://` endpoint and connects to it
 directly instead of treating it as a presign Lambda to `fetch()` first.
-Enter your registered mobile number and click **Call Ava** (any call button
-on the page opens the call panel).
+Enter your full name, date of birth and registered mobile number, then click
+**Call Ava** (any call button on the page opens the call panel).
 
 ### Run it after deploying
 
@@ -586,7 +627,8 @@ Runtime ARN and a Lambda Function URL in front of it:
 2. Open `frontend/index.html` (same file, no separate build/hosting step
    required — or serve it, plus the generated `config.js`, from
    S3/CloudFront/any static host).
-3. Enter the caller's registered mobile number, then click **Call Ava**.
+3. Enter the caller's name, date of birth and registered mobile number, then
+   click **Call Ava**.
 
 **Full deployment steps (ECR, IAM roles, `CreateAgentRuntime`, Lambda,
 Function URL): see [`agentcore_app/DEPLOY.md`](agentcore_app/DEPLOY.md).**

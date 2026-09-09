@@ -219,15 +219,50 @@ Out of the box a trace contains exactly one span, `AgentCore.Runtime.Invoke`
    `aws xray get-trace-segment-destination --region us-west-2`; it must
    report `"Destination": "CloudWatchLogs", "Status": "ACTIVE"`.
 
-Do **not** set `OTEL_EXPORTER_OTLP_ENDPOINT`. AgentCore Runtime does not run
-an OTLP collector inside a custom container — pointing the exporter at the
-conventional `localhost:4318` gets `Connection refused` on every batch, and
-the spans are silently dropped after being correctly created. Traces go
-straight to CloudWatch's own OTLP endpoint,
-`https://xray.<region>.amazonaws.com/v1/traces`, which `_setup_telemetry()`
-builds itself and SigV4-signs with botocore. No ADOT distro and no
-`opentelemetry-instrument` wrapper: the OTel SDK, the OTLP exporter and the
-signer are already installed.
+**How the SDK gets configured.** The container's `CMD` runs under
+`opentelemetry-instrument` (with `aws-opentelemetry-distro` in
+`requirements.txt`), which is AWS's documented entry point for this. It sets
+the SDK up before uvicorn imports the app, and its auto-instrumentation adds
+the spans the agent's own code never emitted: the FastAPI request, the
+botocore calls to Bedrock and DynamoDB, the gateway's MCP round trips.
+
+`_setup_telemetry()` is still there and still needed — it detects that the
+wrapper already configured a provider and leaves it alone, rather than adding
+a second exporter and shipping every span twice. It's what configures tracing
+for every other way this runs: `python strands_agent.py`, a plain `uvicorn`
+command, an image built before the wrapper. Same destination either way.
+
+**The lock moved to make this installable, and both downgrades are load-bearing.**
+`aws-opentelemetry-distro==0.19.0` (the newest release) pins its whole
+dependency set exactly, so `requirements.lock.txt` now holds
+`protobuf==6.33.5` (was `7.36.1`) and `cachetools==6.2.4` (was `7.1.8`).
+Installing the distro without moving them is `ResolutionImpossible`. Both are
+safe against the rest of the graph — every `protobuf` requirer here accepts
+`>=6.33.5,<8.0.0`, and `py-key-value-aio` is the only package that wants
+`cachetools` at all (`>=5.0.0`) — and `pip check` is clean on the result. If
+you ever regenerate the lock and the distro drops out, the `CMD` has to go
+back to plain `uvicorn` in the same change, or tracing dies silently (see
+below).
+
+**You must also fix `OTEL_EXPORTER_OTLP_ENDPOINT` on the runtime.** This is
+the one setting that fails silently, and this runtime has it set to
+`http://localhost:4318` — harmless while tracing was in-process, live breakage
+under the wrapper. AgentCore Runtime does not run an OTLP collector inside a
+custom container, so every batch gets `Connection refused` and the spans are
+dropped after being correctly created. Either unset it, so the distro applies
+its own AgentCore default, or set it to CloudWatch's OTLP endpoint,
+`https://xray.<region>.amazonaws.com/v1/traces`, which needs SigV4 signing —
+the distro does that itself. A runtime's environment variables override the
+image's `ENV`, so this can only be fixed on the runtime, not in the
+Dockerfile. To drop it, pass the full `environmentVariables` map back minus
+that key on the next `update-agent-runtime` (the call replaces rather than
+merges, so omitting a key is how you delete it).
+
+**Why the failure mode is silence.** `opentelemetry-instrument` ships with
+`opentelemetry-instrumentation`, which was already in the lock, so the wrapper
+exists and the container starts normally whether or not the distro is
+installed and whether or not the endpoint is sane. Miss either and you get a
+healthy `/ping`, a working call, and no spans.
 
 Spans land in the `aws/spans` log group. To confirm delivery without opening
 the console:

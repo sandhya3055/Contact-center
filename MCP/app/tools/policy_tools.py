@@ -66,6 +66,68 @@ def lookup_policy_by_number(config: AppConfig, number: str) -> PolicyLookupResul
     return PolicyLookupResult(found=bool(policies), has_active=has_active, policies=policies)
 
 
+def _name_matches(policy: Policy, full_name: str) -> bool:
+    """Whether a policy's holder name is the one given.
+
+    Case-insensitive, and whitespace is collapsed on both sides rather than only
+    trimmed -- "Priya  Sharma" and "Priya Sharma" are the same person, and both
+    the stored record and a caller-supplied name can carry a stray double space
+    (an STT transcript especially). Trimming alone rejected that pair, which is
+    a rejection nobody could act on: read back a name and it sounds identical.
+    Whitespace isn't a secret, so nothing is weakened by ignoring it.
+
+    Deliberately shared by :func:`verify_dob_name` and
+    :func:`lookup_policy_by_identity` rather than written twice: two tools that
+    disagree about what counts as the same name would let a caller pass the
+    check and then fail the lookup, or the reverse.
+    """
+    return _normalize_name(policy.holder_name) == _normalize_name(full_name)
+
+
+def _normalize_name(name: str) -> str:
+    """A name reduced to what it's compared on: case- and spacing-independent."""
+    return " ".join(name.split()).casefold()
+
+
+def lookup_policy_by_identity(
+    config: AppConfig, number: str, dob: str, full_name: str
+) -> PolicyLookupResult:
+    """Look up policies on a number, keeping only those the identity matches.
+
+    The identifying lookup: a number alone reaches every policy on it, so this
+    requires the holder's date of birth and full name to agree with the stored
+    record before any policy is returned. A number whose policies exist but
+    whose date of birth or name doesn't match is indistinguishable here from a
+    number with no policies at all -- both come back ``found=False`` with an
+    empty list -- so this cannot be used to confirm that a number belongs to
+    someone, or to read a holder's details out of one.
+
+    Unlike :func:`verify_dob_name` this is **not** ACTIVE-only. An expired
+    policy still belongs to the caller and is exactly what a renewal
+    conversation is about, so it's returned and reported through ``has_active``
+    (rule #6) rather than hidden.
+
+    Args:
+        config: Application configuration.
+        number: Caller/alternate mobile number in stored format.
+        dob: Caller-provided date of birth (ISO ``YYYY-MM-DD``), matched exactly.
+        full_name: Caller-provided full name, matched case-insensitively/trimmed.
+
+    Returns:
+        A :class:`PolicyLookupResult` over the matching policies only.
+    """
+    matched = [
+        policy
+        for policy in PolicyRepository(config).find_by_mobile(number)
+        if policy.dob == dob.strip() and _name_matches(policy, full_name)
+    ]
+    return PolicyLookupResult(
+        found=bool(matched),
+        has_active=any(policy.is_active for policy in matched),
+        policies=matched,
+    )
+
+
 def verify_dob_name(
     config: AppConfig, number: str, dob: str, full_name: str
 ) -> DobNameVerifyResult:
@@ -84,11 +146,10 @@ def verify_dob_name(
         A :class:`DobNameVerifyResult`.
     """
     want_dob = dob.strip()
-    want_name = full_name.strip().casefold()
     for policy in PolicyRepository(config).find_by_mobile(number):
         if not policy.is_active:
             continue
-        if policy.dob == want_dob and policy.holder_name.strip().casefold() == want_name:
+        if policy.dob == want_dob and _name_matches(policy, full_name):
             return DobNameVerifyResult(verified=True, policy_id=policy.policy_id)
     return DobNameVerifyResult(verified=False)
 
