@@ -1436,10 +1436,39 @@ def _setup_telemetry() -> None:
     Gated on AGENT_OBSERVABILITY_ENABLED so a local run stays quiet: there
     the no-op provider is the correct behaviour, and nothing should be
     shipping a developer's test calls to CloudWatch.
+
+    Also gated on nobody having done it already. The container's CMD runs
+    under `opentelemetry-instrument`, which configures the SDK (and its
+    exporter) before uvicorn imports this module, so in the deployed container
+    this function normally finds a provider in place and leaves it alone —
+    adding a second exporter to it would export every span twice. What it does
+    instead is stay as the fallback for every other way this runs: `python
+    strands_agent.py`, a plain `uvicorn` command, an image built before the
+    wrapper. Same destination either way; only the wiring differs.
     """
     if os.getenv("AGENT_OBSERVABILITY_ENABLED", "").lower() not in ("true", "1", "yes"):
         print("[telemetry] AGENT_OBSERVABILITY_ENABLED not set — tracing off (expected outside AgentCore Runtime)")
         return
+
+    # A real SDK provider here means the process was started under
+    # `opentelemetry-instrument`: nothing in this file installs one before
+    # now, and an unconfigured OTel API hands back a proxy/no-op instead.
+    try:
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk.trace import TracerProvider as SdkTracerProvider
+
+        existing = otel_trace.get_tracer_provider()
+        if isinstance(existing, SdkTracerProvider):
+            endpoint = (os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                        or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or "the distro's default")
+            print(f"[telemetry] already configured by opentelemetry-instrument "
+                  f"(exporting to {endpoint}) — not adding a second exporter")
+            return
+    except Exception as e:
+        # Never fatal: worst case this falls through and configures tracing
+        # itself, which is what every non-wrapped run does anyway.
+        print(f"[telemetry] couldn't inspect the current tracer provider ({e}) — configuring one")
+
     try:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         from opentelemetry.sdk.trace.export import BatchSpanProcessor

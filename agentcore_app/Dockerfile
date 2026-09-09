@@ -44,9 +44,27 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/ping').read()"]
 
-# Plain uvicorn, deliberately: tracing is wired up in-process by
-# StrandsTelemetry at startup (see strands_agent.py), pointed at the OTLP
-# endpoint AgentCore Runtime provides. No ADOT distro and no
-# opentelemetry-instrument wrapper — the OTel SDK and OTLP exporter already
-# ship with strands-agents.
-CMD ["uvicorn", "strands_agent:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run under opentelemetry-instrument, the AWS-documented entry point for
+# AgentCore observability. The wrapper configures the OTel SDK from the
+# OTEL_* environment before uvicorn imports the app, and activates the
+# auto-instrumentation aws-opentelemetry-distro brings with it — so alongside
+# the spans Strands emits for itself (bidi_session, execute_tool, response),
+# traces now also carry the FastAPI request, the botocore calls to Bedrock and
+# DynamoDB, and the gateway's MCP round trips, which the in-process setup
+# never saw.
+#
+# strands_agent._setup_telemetry stays, and detects that this has already
+# happened rather than adding a second exporter to the same provider (which
+# would export every span twice). It's the fallback for every other way this
+# runs: `python strands_agent.py`, a plain uvicorn command, an older image.
+#
+# One trap worth knowing, because it fails silently. The wrapper honours
+# OTEL_EXPORTER_OTLP_ENDPOINT, and a runtime configured with the conventional
+# `http://localhost:4318` will send every batch to a collector that does not
+# exist inside a custom container — nothing there listens, and the spans are
+# dropped with only a connection error in the log. Either unset that variable
+# so the distro applies its own AgentCore default, or point it at the signed
+# CloudWatch endpoint the in-process path uses:
+# `https://xray.<region>.amazonaws.com/v1/traces`. See DEPLOY.md.
+CMD ["opentelemetry-instrument", "uvicorn", "strands_agent:app", \
+     "--host", "0.0.0.0", "--port", "8080"]
