@@ -810,9 +810,17 @@ function renderCall(call, isFirst) {
     ['Caller number', call.mobile_number || 'not provided', true],
     ['Call started', fmtTime(call.started_at), false],
   ];
+  const shown = new Set(rows.map(([label]) => label.toLowerCase()));
   for (const [key, value] of Object.entries(details)) {
     if (key === 'reason' || key === 'note' || value === null || value === '') continue;
-    rows.push([key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()), String(value), /id|number|ref/i.test(key)]);
+    const label = key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+    // The tool passes the caller's number back as an argument, which would
+    // otherwise print a second "Caller number" row under the first. Matched by
+    // label rather than by a hardcoded key list, so the generic rendering
+    // still surfaces genuinely new arguments.
+    if (shown.has(label.toLowerCase())) continue;
+    shown.add(label.toLowerCase());
+    rows.push([label, String(value), /id|number|ref/i.test(key)]);
   }
   if (call.escalation && call.escalation.escalation_id) {
     rows.push(['Escalation id', call.escalation.escalation_id, true]);
