@@ -45,26 +45,35 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/ping').read()"]
 
 # Run under opentelemetry-instrument, the AWS-documented entry point for
-# AgentCore observability. The wrapper configures the OTel SDK from the
-# OTEL_* environment before uvicorn imports the app, and activates the
+# AgentCore observability. The wrapper configures the OTel SDK from the OTEL_*
+# environment before uvicorn imports the app, and activates the
 # auto-instrumentation aws-opentelemetry-distro brings with it — so alongside
-# the spans Strands emits for itself (bidi_session, execute_tool, response),
-# traces now also carry the FastAPI request, the botocore calls to Bedrock and
-# DynamoDB, and the gateway's MCP round trips, which the in-process setup
-# never saw.
+# the spans Strands emits for itself (bidi_session, execute_tool, response), a
+# trace now also carries the FastAPI request, the botocore calls to Bedrock and
+# DynamoDB, and the gateway's MCP round trips, none of which the in-process
+# setup ever saw.
 #
 # strands_agent._setup_telemetry stays, and detects that this has already
 # happened rather than adding a second exporter to the same provider (which
-# would export every span twice). It's the fallback for every other way this
+# would export every span twice). It remains the path for every other way this
 # runs: `python strands_agent.py`, a plain uvicorn command, an older image.
 #
-# One trap worth knowing, because it fails silently. The wrapper honours
-# OTEL_EXPORTER_OTLP_ENDPOINT, and a runtime configured with the conventional
-# `http://localhost:4318` will send every batch to a collector that does not
-# exist inside a custom container — nothing there listens, and the spans are
-# dropped with only a connection error in the log. Either unset that variable
-# so the distro applies its own AgentCore default, or point it at the signed
-# CloudWatch endpoint the in-process path uses:
-# `https://xray.<region>.amazonaws.com/v1/traces`. See DEPLOY.md.
+# Two things had to move with this line, and it is broken without either:
+#
+#  1. requirements.lock.txt — the distro pins its dependency set exactly, so
+#     protobuf went 7.36.1 -> 6.33.5 and cachetools 7.1.8 -> 6.2.4. Without
+#     that the install is ResolutionImpossible. See requirements.txt.
+#  2. OTEL_EXPORTER_OTLP_ENDPOINT on the *runtime* must not be
+#     `http://localhost:4318`. The wrapper honours it, no custom container runs
+#     a collector there, and every batch is then dropped with only a connection
+#     error in the log — spans correctly created and silently discarded. Unset
+#     it so the distro applies its own AgentCore default, or point it at
+#     `https://xray.<region>.amazonaws.com/v1/traces`, which the distro
+#     SigV4-signs itself. A runtime's environment overrides the image's ENV, so
+#     this can only be fixed on the runtime. See DEPLOY.md.
+#
+# The failure mode if 1 or 2 is missed is silence, not a crash: the wrapper
+# ships with opentelemetry-instrumentation (already in the lock), so the
+# container starts either way and simply stops tracing.
 CMD ["opentelemetry-instrument", "uvicorn", "strands_agent:app", \
      "--host", "0.0.0.0", "--port", "8080"]

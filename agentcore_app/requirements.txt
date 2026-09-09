@@ -14,13 +14,17 @@ bedrock-agentcore[strands-agents]==1.21.0  # AgentCoreMemorySessionManager — s
                             # runs without it otherwise (see build_memory_session_manager).
 aws-opentelemetry-distro==0.19.0  # the ADOT distro behind `opentelemetry-instrument` (see the
                             # Dockerfile CMD). Brings the auto-instrumentation the wrapper activates —
-                            # FastAPI, botocore, urllib3 — and, with AGENT_OBSERVABILITY_ENABLED set,
-                            # points the OTLP exporter at CloudWatch's signed endpoint itself, which is
-                            # what strands_agent._setup_telemetry falls back to doing by hand.
-                            # Version matters: each release pins the whole opentelemetry-* set to one
-                            # exact version, so it has to agree with what strands-agents resolves to.
-                            # 0.19.0 pins api/sdk 1.44.0 and the instrumentation 0.65b0, which is
-                            # already what this lock holds. An older distro (0.13.0) instead drags
+                            # FastAPI, botocore, urllib3 — so a trace carries the request and the AWS
+                            # calls, not just the spans Strands emits for itself.
+                            # This release pins its whole dependency set exactly, and two of those
+                            # pins are why the lock below moved: protobuf==6.33.5 (was 7.36.1) and
+                            # cachetools==6.2.4 (was 7.1.8). Both are downgrades, and both are safe
+                            # against the rest of the graph — every protobuf requirer here accepts
+                            # >=6.33.5,<8.0.0, and py-key-value-aio is the only thing that wants
+                            # cachetools at all (>=5.0.0). Installing 0.19.0 without moving them is
+                            # ResolutionImpossible, so this and the lock have to change together.
+                            # It also pins api/sdk 1.44.0 and the instrumentation 0.65b0, which is
+                            # what the lock already held. An older distro (0.13.0) instead drags
                             # opentelemetry-proto back to a release whose protobuf range has no
                             # candidate here, and the resolve fails outright rather than degrading.
 python-dotenv==1.2.3        # loads ../.env for local dev only (no-op in the deployed container)
