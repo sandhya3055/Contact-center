@@ -15,14 +15,19 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY requirements.txt .
+# The lock, not requirements.txt: exact transitive versions, so an image
+# rebuilt from the same commit installs the same packages. See the header of
+# requirements.lock.txt for why that matters here and how to regenerate it.
+# Only the lock is copied, so editing the human-facing requirements.txt
+# doesn't invalidate this layer — regenerating the lock does.
+COPY requirements.lock.txt .
 # python:3.13-slim's bundled pip/setuptools is old enough that building
 # pyaudio from source hits `AttributeError: module 'pkgutil' has no
 # attribute 'ImpImporter'` (removed in Python 3.12+, only triggered by the
 # legacy pkg_resources-based build path a stale setuptools still uses).
 # Upgrading first avoids that path entirely.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.lock.txt
 
 # portal.html is read at request time by handoff.py, so it has to ship too.
 COPY strands_agent.py handoff.py portal_context.py portal.html ./

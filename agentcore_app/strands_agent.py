@@ -196,6 +196,30 @@ def _silent_audio_event() -> dict[str, Any]:
     }
 
 
+def _normalize_caller_audio(message: dict[str, Any]) -> dict[str, Any]:
+    """Fill in the audio fields the model requires but a browser needn't know.
+
+    An audio frame from the page carries `audio` and `sample_rate` — the two
+    facts the page actually has. `format` and `channels` describe how this
+    agent captures audio, which is this process's business, not the client's.
+
+    Not cosmetic: BidiAudioInputEvent made both required, so a frame without
+    them raises TypeError inside send() — which ends run() and drops the call
+    the instant the caller first speaks, while Ava's greeting still plays
+    normally because that direction never touches this event. Filling them in
+    here keeps every already-deployed page working, and keeps the wire format
+    the page has to satisfy as small as it can be.
+    """
+    if message.get("type") != "bidi_audio_input":
+        return message
+    if "format" in message and "channels" in message:
+        return message
+    return {**message,
+             "format": message.get("format", "pcm"),
+             "sample_rate": message.get("sample_rate", INPUT_SAMPLE_RATE),
+             "channels": message.get("channels", 1)}
+
+
 SYSTEM_INSTRUCTION = """
 You are Ava, a voice assistant for a contact center. Every word you write is spoken aloud by a text-to-speech engine. There is no private channel — no reasoning, plans, notes, labels, field names, or raw tool output. Write only what a human agent would say.
 Open with exactly: "Hi, I'm Ava, your AI Assistant. I can help with your policy details, register a claim, or connect you with a human agent." Then listen. Never repeat that list; if you're unsure what they want, ask "What would you like to do next?"
@@ -1761,7 +1785,7 @@ async def voice_chat(websocket: WebSocket) -> None:
                     if message.get("type") == "bidi_audio_input":
                         return _silent_audio_event()
                     continue
-                return message
+                return _normalize_caller_audio(message)
 
         async def send_to_caller(event: dict[str, Any]) -> None:
             """Ava -> caller, unless a human has taken the call."""
