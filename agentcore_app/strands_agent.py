@@ -162,6 +162,66 @@ def _sanitize_untrusted(data):
 # true dedup still depends on the gateway tool itself being safe to retry.
 IDEMPOTENCY_WINDOW_SECONDS = 30
 
+
+def _record_governance_event(
+    *,
+    gate: str,
+    action: str,
+    reason: str,
+    session_id: str,
+    tool_name: str,
+    **extra: Any,
+) -> None:
+    """One hook every gate below calls exactly once when it blocks, holds,
+    dedupes, or neutralizes something — so "how many grounding blocks this
+    week" becomes one CloudWatch Logs Insights query instead of a regex over
+    free-text print statements.
+
+    Does two things with the same event, both landing in CloudWatch with no
+    new pipeline to run:
+
+    1. Tags the *current* span with ``ava.gate.*`` attributes. That span is
+       already part of the trace _setup_telemetry() exports to CloudWatch
+       GenAI Observability, so the gate's decision shows up directly on that
+       call's execute_tool span in the Traces view — no separate exporter,
+       no new endpoint. get_current_span() degrades to a harmless no-op span
+       when tracing is off (local dev, AGENT_OBSERVABILITY_ENABLED unset),
+       so this is safe to call unconditionally.
+    2. Emits one structured JSON line on stdout. That's the same stdout
+       AgentCore already ships to this agent's runtime-logs log group
+       (/aws/bedrock-agentcore/runtimes/<agent_id>-<endpoint>/[runtime-logs])
+       with zero extra configuration — the JSON shape just makes it
+       Logs-Insights-queryable (`filter governance_event = "ava_gate"`)
+       instead of grep-only.
+    """
+    try:
+        from opentelemetry import trace as _trace
+
+        span = _trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.set_attribute("ava.gate.name", gate)
+            span.set_attribute("ava.gate.action", action)
+            span.set_attribute("ava.gate.reason", reason)
+            span.set_attribute("ava.session_id", session_id)
+            for key, value in extra.items():
+                span.set_attribute(f"ava.gate.{key}", value)
+    except Exception as e:
+        # Tracing is best-effort; the log line below is the record of truth,
+        # so a span-tagging failure shouldn't be silent but also shouldn't
+        # ever block the event from being logged.
+        print(f"[governance] span tagging failed, continuing: {e}")
+
+    event = {
+        "governance_event": "ava_gate",
+        "gate": gate,
+        "action": action,
+        "reason": reason,
+        "session_id": session_id,
+        "tool": tool_name,
+        **extra,
+    }
+    print(f"[governance] {json.dumps(event, default=str)}")
+
 # Human-in-the-loop threshold (G4.19): a claim at or above this estimated
 # cost must not be registered autonomously, however confident Ava is —
 # confirmed with the team as the business threshold. Detected generically
@@ -683,10 +743,11 @@ class _GroundingGateTool(AgentTool):
     which tool or field this applies to.
     """
 
-    def __init__(self, wrapped: AgentTool, grounded_values: dict[str, set[str]]) -> None:
+    def __init__(self, wrapped: AgentTool, grounded_values: dict[str, set[str]], session_id: str) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._grounded_values = grounded_values
+        self._session_id = session_id
 
     @property
     def tool_name(self) -> str:
@@ -709,6 +770,14 @@ class _GroundingGateTool(AgentTool):
         ]
         if ungrounded:
             print(f"[grounding blocked] {tool_use['name']} args {ungrounded} were not returned by a completed lookup this call")
+            _record_governance_event(
+                gate="grounding",
+                action="blocked",
+                reason="argument_not_grounded",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                fields=ungrounded,
+            )
             yield ToolResultEvent(
                 {
                     "toolUseId": tool_use["toolUseId"],
@@ -752,9 +821,10 @@ class _ToolOutputSanitizerTool(AgentTool):
     only ever operates on already-sanitized content.
     """
 
-    def __init__(self, wrapped: AgentTool) -> None:
+    def __init__(self, wrapped: AgentTool, session_id: str) -> None:
         super().__init__()
         self._wrapped = wrapped
+        self._session_id = session_id
 
     @property
     def tool_name(self) -> str:
@@ -774,7 +844,16 @@ class _ToolOutputSanitizerTool(AgentTool):
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
         async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
             if isinstance(event, ToolResultEvent):
-                event = ToolResultEvent(_sanitize_untrusted(event.tool_result), exception=event.exception)
+                sanitized = _sanitize_untrusted(event.tool_result)
+                if sanitized != event.tool_result:
+                    _record_governance_event(
+                        gate="output_sanitizer",
+                        action="neutralized",
+                        reason="instruction_shaped_content",
+                        session_id=self._session_id,
+                        tool_name=tool_use["name"],
+                    )
+                event = ToolResultEvent(sanitized, exception=event.exception)
             yield event
 
 
@@ -807,9 +886,10 @@ class _IdempotencyGateTool(AgentTool):
 
     _MAX_IDENTICAL_ATTEMPTS = 3
 
-    def __init__(self, wrapped: AgentTool) -> None:
+    def __init__(self, wrapped: AgentTool, session_id: str) -> None:
         super().__init__()
         self._wrapped = wrapped
+        self._session_id = session_id
         self._cache: dict[str, tuple[float, ToolResult]] = {}
         self._attempt_counts: dict[str, int] = {}
 
@@ -834,6 +914,14 @@ class _IdempotencyGateTool(AgentTool):
             print(
                 f"[repeat blocked] {tool_use['name']} called with the exact same arguments "
                 f"{attempts - 1} times already this call with nothing changed — forcing escalation"
+            )
+            _record_governance_event(
+                gate="idempotency",
+                action="blocked",
+                reason="repeat_limit_exceeded",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                attempts=attempts - 1,
             )
             yield ToolResultEvent(
                 {
@@ -861,6 +949,14 @@ class _IdempotencyGateTool(AgentTool):
             print(
                 f"[idempotency] {tool_use['name']} — repeat of a call from {now - age:.1f}s ago, "
                 "returning its cached result instead of re-executing"
+            )
+            _record_governance_event(
+                gate="idempotency",
+                action="deduped",
+                reason="cache_hit",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                age_seconds=round(now - age, 1),
             )
             yield ToolResultEvent({**cached_result, "toolUseId": tool_use["toolUseId"]})
             return
@@ -891,9 +987,10 @@ class _HighValueClaimGateTool(AgentTool):
     this policy rejects should never reach — or be cached by — either.
     """
 
-    def __init__(self, wrapped: AgentTool) -> None:
+    def __init__(self, wrapped: AgentTool, session_id: str) -> None:
         super().__init__()
         self._wrapped = wrapped
+        self._session_id = session_id
 
     @property
     def tool_name(self) -> str:
@@ -914,6 +1011,15 @@ class _HighValueClaimGateTool(AgentTool):
             print(
                 f"[hitl required] {tool_use['name']} blocked — "
                 f"{HIGH_VALUE_CLAIM_FIELD}={cost} >= {HIGH_VALUE_CLAIM_THRESHOLD}"
+            )
+            _record_governance_event(
+                gate="high_value_claim",
+                action="held",
+                reason="threshold_exceeded",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                cost=cost,
+                threshold=HIGH_VALUE_CLAIM_THRESHOLD,
             )
             yield ToolResultEvent(
                 {
@@ -1150,12 +1256,14 @@ class _TranscriptConsistencyGateTool(AgentTool):
         recent_digits: _RecentUserDigits,
         grounded_values: dict[str, set[str]],
         tried_numbers: set[str],
+        session_id: str,
     ) -> None:
         super().__init__()
         self._wrapped = wrapped
         self._recent_digits = recent_digits
         self._grounded_values = grounded_values
         self._tried_numbers = tried_numbers
+        self._session_id = session_id
 
     @property
     def tool_name(self) -> str:
@@ -1184,6 +1292,14 @@ class _TranscriptConsistencyGateTool(AgentTool):
             print(
                 f"[transcript mismatch] {tool_use['name']} args {truncated_fields} are a truncated "
                 f"prefix of what the caller actually said ({spoken!r}) — likely a dropped digit"
+            )
+            _record_governance_event(
+                gate="transcript_consistency",
+                action="blocked",
+                reason="truncated_digits",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                fields=truncated_fields,
             )
             yield ToolResultEvent(
                 {
@@ -1222,6 +1338,14 @@ class _TranscriptConsistencyGateTool(AgentTool):
             print(
                 f"[fabrication blocked] {tool_use['name']} args {fabricated_fields} were never provided "
                 "by the caller this call, spoken or typed — likely invented"
+            )
+            _record_governance_event(
+                gate="transcript_consistency",
+                action="blocked",
+                reason="fabricated_identifier",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                fields=fabricated_fields,
             )
             yield ToolResultEvent(
                 {
@@ -1264,6 +1388,14 @@ class _TranscriptConsistencyGateTool(AgentTool):
                 f"[stale number blocked] {tool_use['name']} args {stale_fields} repeat an "
                 f"already-tried number, but the caller most recently said different digits "
                 f"({spoken!r}) — refusing the silent reuse"
+            )
+            _record_governance_event(
+                gate="transcript_consistency",
+                action="blocked",
+                reason="stale_reuse",
+                session_id=self._session_id,
+                tool_name=tool_use["name"],
+                fields=stale_fields,
             )
             yield ToolResultEvent(
                 {
@@ -1324,6 +1456,10 @@ async def build_gateway_tools(
     scoped to this call's
     grounded_values/cache/recent_digits/known_mobile_number, so state never
     leaks across connections.
+
+    Every gate above also reports through _record_governance_event when it
+    blocks, holds, dedupes, or neutralizes something, tagged with this call's
+    session_id — see that function for where those events end up.
     """
     call_session_id = str(uuid.uuid4())
     grounded_values: dict[str, set[str]] = {}
@@ -1337,11 +1473,11 @@ async def build_gateway_tools(
             _bare_tool_name(tool) in _SESSION_ID_TOOL_NAMES_WITHOUT_SCHEMA_PROPERTY
         ):
             tool = _FixedArgumentTool(tool, session_id=call_session_id)
-        tool = _ToolOutputSanitizerTool(tool)
-        tool = _GroundingGateTool(tool, grounded_values)
-        tool = _IdempotencyGateTool(tool)
-        tool = _HighValueClaimGateTool(tool)
-        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers)
+        tool = _ToolOutputSanitizerTool(tool, call_session_id)
+        tool = _GroundingGateTool(tool, grounded_values, call_session_id)
+        tool = _IdempotencyGateTool(tool, call_session_id)
+        tool = _HighValueClaimGateTool(tool, call_session_id)
+        tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers, call_session_id)
         tool = _MobileNumberSyncTool(tool, on_mobile_number_confirmed, known_mobile_number)
         tool = _EscalationNotifierTool(tool, live_call)
         wrapped.append(_LoggingTool(tool))
