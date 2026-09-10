@@ -1,0 +1,115 @@
+{
+  "widgets": [
+    {
+      "type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
+      "properties": {
+        "markdown": "# Ava voice agent — calls, cost, health\nEvery number here comes from the per-call EMF ledger `observability.py` writes to the runtime log group. **`CallCostUsd` is empty until `NOVA_SONIC_PRICES_JSON` is set on the runtime** — token counts are recorded either way. Model cost is below; the runtime's own vCPU/GB-hours are in the compute widget at the bottom, joinable on `session_id`."
+      }
+    },
+    {
+      "type": "metric", "x": 0, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "Model cost per day (USD)",
+        "region": "us-west-2", "view": "timeSeries", "stacked": true, "stat": "Sum", "period": 86400,
+        "metrics": [
+          [ "Ava/Calls", "CallCostUsd", "service", "ava-voice-agent", "outcome", "completed" ],
+          [ "...", "outcome", "escalated" ],
+          [ "...", "outcome", "human_handoff" ],
+          [ "...", "outcome", "caller_disconnected" ],
+          [ "...", "outcome", "error" ]
+        ],
+        "yAxis": { "left": { "label": "USD", "showUnits": false } }
+      }
+    },
+    {
+      "type": "metric", "x": 12, "y": 2, "width": 12, "height": 6,
+      "properties": {
+        "title": "Cost per call (USD) — avg and p95",
+        "region": "us-west-2", "view": "timeSeries", "period": 3600,
+        "metrics": [
+          [ "Ava/Calls", "CallCostUsd", "service", "ava-voice-agent", { "stat": "Average", "label": "avg" } ],
+          [ "...", { "stat": "p95", "label": "p95" } ],
+          [ "...", { "stat": "Maximum", "label": "max" } ]
+        ],
+        "yAxis": { "left": { "label": "USD", "showUnits": false } }
+      }
+    },
+    {
+      "type": "metric", "x": 0, "y": 8, "width": 8, "height": 6,
+      "properties": {
+        "title": "Calls by outcome",
+        "region": "us-west-2", "view": "timeSeries", "stacked": true, "stat": "Sum", "period": 3600,
+        "metrics": [
+          [ "Ava/Calls", "Calls", "service", "ava-voice-agent", "outcome", "completed" ],
+          [ "...", "outcome", "caller_disconnected" ],
+          [ "...", "outcome", "escalated" ],
+          [ "...", "outcome", "human_handoff" ],
+          [ "...", "outcome", "error" ]
+        ]
+      }
+    },
+    {
+      "type": "metric", "x": 8, "y": 8, "width": 8, "height": 6,
+      "properties": {
+        "title": "Call duration (seconds)",
+        "region": "us-west-2", "view": "timeSeries", "period": 3600,
+        "metrics": [
+          [ "Ava/Calls", "CallDurationSeconds", "service", "ava-voice-agent", { "stat": "p50", "label": "p50" } ],
+          [ "...", { "stat": "p95", "label": "p95" } ],
+          [ "...", { "stat": "Maximum", "label": "max" } ]
+        ]
+      }
+    },
+    {
+      "type": "metric", "x": 16, "y": 8, "width": 8, "height": 6,
+      "properties": {
+        "title": "Tool calls and gate blocks",
+        "region": "us-west-2", "view": "timeSeries", "stat": "Sum", "period": 3600,
+        "metrics": [
+          [ "Ava/Calls", "ToolCalls", "service", "ava-voice-agent" ],
+          [ "Ava/Calls", "GateBlocks", "service", "ava-voice-agent" ]
+        ]
+      }
+    },
+    {
+      "type": "metric", "x": 0, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "Tokens by modality (Sum) — speech dominates, and is priced differently",
+        "region": "us-west-2", "view": "timeSeries", "stacked": true, "stat": "Sum", "period": 3600,
+        "metrics": [
+          [ "Ava/Calls", "SpeechInTokens", "service", "ava-voice-agent" ],
+          [ "Ava/Calls", "SpeechOutTokens", "service", "ava-voice-agent" ],
+          [ "Ava/Calls", "TextInTokens", "service", "ava-voice-agent" ],
+          [ "Ava/Calls", "TextOutTokens", "service", "ava-voice-agent" ]
+        ]
+      }
+    },
+    {
+      "type": "log", "x": 12, "y": 14, "width": 12, "height": 6,
+      "properties": {
+        "title": "Errors and refusals (all services, one query)",
+        "region": "us-west-2",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT' | SOURCE '/aws/lambda/insurarncae-voice-agent-mcp-tool'\n| fields @timestamp, service, call_id, session_id, event, msg, error\n| filter level in [\"ERROR\", \"WARNING\"]\n| sort @timestamp desc\n| limit 50",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log", "x": 0, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "Runtime compute per session (the other half of cost)",
+        "region": "us-west-2",
+        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields attributes.session.id as session_id, metrics.`agent.runtime.vcpu.hours.used` as vcpu_h, metrics.`agent.runtime.memory.gb_hours.used` as gb_h\n| stats sum(vcpu_h) as vcpu_hours, sum(gb_h) as gb_hours by session_id\n| sort vcpu_hours desc\n| limit 25",
+        "view": "table"
+      }
+    },
+    {
+      "type": "log", "x": 12, "y": 20, "width": 12, "height": 6,
+      "properties": {
+        "title": "Recent call ledger (one row per finished call)",
+        "region": "us-west-2",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| fields @timestamp, call_id, session_id, outcome, CallDurationSeconds, InputTokens, OutputTokens, ToolCalls, GateBlocks, CallCostUsd, cost_priced, modality_split_available\n| filter event = \"call.ledger\"\n| sort @timestamp desc\n| limit 50",
+        "view": "table"
+      }
+    }
+  ]
+}

@@ -69,6 +69,27 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 # container, AgentCore Runtime injects environment variables directly and
 # there's no .env file present — load_dotenv() is then a harmless no-op.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+# Before every other local import, and in particular before _setup_telemetry()
+# below: this replaces the root logger's handlers, and anything that logs
+# during its own import (the OTel SDK, botocore) should come out in the same
+# JSON shape as the rest. See observability.py for what that buys.
+from observability import (
+    CALL_ID,
+    CALL_USAGE,
+    COUNTERS,
+    SESSION_ID,
+    CallUsage,
+    bump,
+    emit_call_ledger,
+    event,
+    log,
+    record_nova_usage,
+    setup_logging,
+)
+
+setup_logging()
+
 import handoff
 from handoff import LiveCall
 from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
@@ -147,7 +168,7 @@ def _sanitize_untrusted(data):
     if isinstance(data, list):
         return [_sanitize_untrusted(item) for item in data]
     if isinstance(data, str) and _looks_like_injection(data):
-        print(f"[untrusted-output] neutralized suspicious content: {data[:80]!r}...")
+        event("untrusted_output.neutralized", sample=repr(data[:80]))
         return "[content removed: this looked like an embedded instruction, not data]"
     return data
 
@@ -209,18 +230,30 @@ def _record_governance_event(
         # Tracing is best-effort; the log line below is the record of truth,
         # so a span-tagging failure shouldn't be silent but also shouldn't
         # ever block the event from being logged.
-        print(f"[governance] span tagging failed, continuing: {e}")
+        event("governance.span_tagging_failed", error=str(e))
 
-    event = {
-        "governance_event": "ava_gate",
-        "gate": gate,
-        "action": action,
-        "reason": reason,
-        "session_id": session_id,
-        "tool": tool_name,
+    # An action that actually stopped something, as opposed to one that merely
+    # observed it. Only "blocked" and "held" count into the ledger's
+    # GateBlocks — "deduped" and "neutralized" are routine on a healthy call
+    # and would drown the signal that something was genuinely refused.
+    if action in ("blocked", "held"):
+        bump("gate_blocks")
+
+    event(
+        "gate." + action,
+        governance_event="ava_gate",
+        gate=gate,
+        action=action,
+        reason=reason,
+        tool=tool_name,
+        # Not the same id as the log line's `session_id`, which is the
+        # AgentCore Runtime session. This one is the per-call uuid
+        # build_gateway_tools injects into tools that require a session_id,
+        # and it's what appears in the gateway Lambda's own logs — so it is
+        # the key that joins a gate decision to the tool call it stopped.
+        tool_session_id=session_id,
         **extra,
-    }
-    print(f"[governance] {json.dumps(event, default=str)}")
+    )
 
 # Human-in-the-loop threshold (G4.19): a claim at or above this estimated
 # cost must not be registered autonomously, however confident Ava is —
@@ -354,15 +387,16 @@ async def get_system_prompt() -> str:
     stale-but-working prompt beats no call connecting at all.
     """
     if not BEDROCK_PROMPT_ID:
-        print("[prompt] BEDROCK_PROMPT_ID not set — using the hardcoded SYSTEM_INSTRUCTION")
+        event("prompt.local", reason="BEDROCK_PROMPT_ID not set")
         return SYSTEM_INSTRUCTION
     try:
         text = await asyncio.to_thread(_fetch_prompt_template)
         version_label = BEDROCK_PROMPT_VERSION or "DRAFT"
-        print(f"[prompt] using {BEDROCK_PROMPT_ID!r} version={version_label} ({len(text)} chars) from Bedrock Prompt Management")
+        event("prompt.fetched", prompt_id=BEDROCK_PROMPT_ID, version=version_label, chars=len(text))
         return text
     except Exception as e:
-        print(f"[prompt] failed to fetch {BEDROCK_PROMPT_ID!r} from Bedrock Prompt Management, falling back to SYSTEM_INSTRUCTION: {e}")
+        event("prompt.fetch_failed", prompt_id=BEDROCK_PROMPT_ID, error=str(e),
+              fallback="SYSTEM_INSTRUCTION")
         return SYSTEM_INSTRUCTION
 
 
@@ -427,7 +461,7 @@ def build_memory_session_manager(actor_id: str, session_id: str):
             AgentCoreMemorySessionManager,
         )
     except ImportError as e:
-        print(f"[memory] bedrock-agentcore not installed, running without memory: {e}")
+        event("memory.unavailable", error=str(e))
         return None
 
     try:
@@ -451,10 +485,10 @@ def build_memory_session_manager(actor_id: str, session_id: str):
             async_mode=True,
         )
         manager = AgentCoreMemorySessionManager(config, region_name=MEMORY_REGION)
-        print(f"[memory] session manager ready (actor={actor_id}, session={session_id})")
+        event("memory.ready", actor=actor_id, memory_session=session_id)
         return manager
     except Exception as e:
-        print(f"[memory] could not start session manager, running without memory: {e}")
+        event("memory.start_failed", error=str(e))
         return None
 
 
@@ -480,17 +514,33 @@ class _LoggingTool(AgentTool):
         return self._wrapped.tool_spec
 
     async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
-        print(f"[tool call] {tool_use['name']}({tool_use.get('input')})")
-        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+        # `tool_event`, not `event`: the module-level `event()` logger is
+        # called below, and every other wrapper in this file binds the loop
+        # variable to `event` — which would shadow it. The wrappers that
+        # don't log are left alone; this one has to be the exception.
+        started = time.monotonic()
+        bump("tool_calls")
+        event("tool.call", tool=tool_use["name"], arguments=tool_use.get("input"))
+        async for tool_event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
             # Logged as the result passes through, NOT after the loop: Strands'
             # tool executor `return`s the moment it sees a ToolResultEvent
             # (strands/tools/executors/_executor.py), abandoning this
             # generator — so anything after the `async for` never runs. Every
             # wrapper in this file that acts on a result does it here, inside
             # the loop, for that reason.
-            if isinstance(event, ToolResultEvent):
-                print(f"[tool result] {tool_use['name']} -> {event}")
-            yield event
+            if isinstance(tool_event, ToolResultEvent):
+                result = tool_event.tool_result
+                status = result.get("status") if isinstance(result, dict) else None
+                if status and status != "success":
+                    bump("tool_errors")
+                event(
+                    "tool.result",
+                    tool=tool_use["name"],
+                    status=status,
+                    duration_ms=round((time.monotonic() - started) * 1000, 1),
+                    result=str(result)[:2000],
+                )
+            yield tool_event
 
 
 class _MobileNumberSyncTool(AgentTool):
@@ -769,7 +819,6 @@ class _GroundingGateTool(AgentTool):
             if key in self._grounded_values and str(value) not in self._grounded_values[key]
         ]
         if ungrounded:
-            print(f"[grounding blocked] {tool_use['name']} args {ungrounded} were not returned by a completed lookup this call")
             _record_governance_event(
                 gate="grounding",
                 action="blocked",
@@ -911,10 +960,6 @@ class _IdempotencyGateTool(AgentTool):
         attempts = self._attempt_counts.get(cache_key, 0) + 1
         self._attempt_counts[cache_key] = attempts
         if attempts > self._MAX_IDENTICAL_ATTEMPTS:
-            print(
-                f"[repeat blocked] {tool_use['name']} called with the exact same arguments "
-                f"{attempts - 1} times already this call with nothing changed — forcing escalation"
-            )
             _record_governance_event(
                 gate="idempotency",
                 action="blocked",
@@ -946,10 +991,6 @@ class _IdempotencyGateTool(AgentTool):
         now = time.monotonic()
         if cached is not None and now - cached[0] < IDEMPOTENCY_WINDOW_SECONDS:
             age, cached_result = cached
-            print(
-                f"[idempotency] {tool_use['name']} — repeat of a call from {now - age:.1f}s ago, "
-                "returning its cached result instead of re-executing"
-            )
             _record_governance_event(
                 gate="idempotency",
                 action="deduped",
@@ -1008,10 +1049,6 @@ class _HighValueClaimGateTool(AgentTool):
         arguments = tool_use.get("input") or {}
         cost = arguments.get(HIGH_VALUE_CLAIM_FIELD)
         if isinstance(cost, (int, float)) and cost >= HIGH_VALUE_CLAIM_THRESHOLD:
-            print(
-                f"[hitl required] {tool_use['name']} blocked — "
-                f"{HIGH_VALUE_CLAIM_FIELD}={cost} >= {HIGH_VALUE_CLAIM_THRESHOLD}"
-            )
             _record_governance_event(
                 gate="high_value_claim",
                 action="held",
@@ -1343,10 +1380,6 @@ class _TranscriptConsistencyGateTool(AgentTool):
             and spoken.startswith(value[1:])
         ]
         if truncated_fields:
-            print(
-                f"[transcript mismatch] {tool_use['name']} args {truncated_fields} are a truncated "
-                f"prefix of what the caller actually said ({spoken!r}) — likely a dropped digit"
-            )
             _record_governance_event(
                 gate="transcript_consistency",
                 action="blocked",
@@ -1400,10 +1433,6 @@ class _TranscriptConsistencyGateTool(AgentTool):
                 if len(digits) >= _FABRICATION_MIN_DIGITS and digits not in ever_provided:
                     fabricated_fields.append(key)
         if fabricated_fields:
-            print(
-                f"[fabrication blocked] {tool_use['name']} args {fabricated_fields} were never provided "
-                "by the caller this call, spoken or typed — likely invented"
-            )
             _record_governance_event(
                 gate="transcript_consistency",
                 action="blocked",
@@ -1449,11 +1478,6 @@ class _TranscriptConsistencyGateTool(AgentTool):
             and value[1:] not in spoken
         ]
         if stale_fields:
-            print(
-                f"[stale number blocked] {tool_use['name']} args {stale_fields} repeat an "
-                f"already-tried number, but the caller most recently said different digits "
-                f"({spoken!r}) — refusing the silent reuse"
-            )
             _record_governance_event(
                 gate="transcript_consistency",
                 action="blocked",
@@ -1530,7 +1554,7 @@ async def build_gateway_tools(
     grounded_values: dict[str, set[str]] = {}
     tried_numbers: set[str] = set()
     all_tools = await mcp_client.load_tools()
-    print(f"[gateway] tools discovered: {[t.tool_name for t in all_tools]}")
+    event("gateway.tools_discovered", tools=[t.tool_name for t in all_tools])
 
     wrapped: list[AgentTool] = []
     for tool in all_tools:
@@ -1550,7 +1574,38 @@ async def build_gateway_tools(
     return wrapped
 
 
-sonic_model = BidiNovaSonicModel(
+class _UsageCapturingNovaSonic(BidiNovaSonicModel):
+    """Nova Sonic, plus the token counts Strands drops on the floor.
+
+    Nova's `usageEvent` reports tokens split by modality, and speech and text
+    are billed at very different rates — so the split is not a nicety, it's
+    the difference between a cost figure and a guess. Strands'
+    `_convert_nova_event` reads only `totalInputTokens`/`totalOutputTokens`
+    from that event and discards `details` before anything downstream can see
+    it, and the `BidiUsageEvent` it emits has a `modality_details` field that
+    the Nova path never populates.
+
+    `_convert_nova_event` is the single funnel every provider frame passes
+    through, which makes it the one place to tap: one dict membership test per
+    frame, and the `super()` call still returns exactly what it returned
+    before, so nothing about the call's behaviour changes. Tapping
+    `receive()` instead would mean re-implementing an async generator; tapping
+    the agent's output callbacks would only ever see the totals.
+
+    Overriding a private method is a real coupling to a specific Strands
+    version, which is why `requirements.txt` pins `strands-agents==1.54.0`
+    exactly. If a bump ever removes or renames this method the failure is
+    loud (AttributeError at import, no calls served) rather than a silently
+    empty cost dashboard — that is the preferable direction for this trade.
+    """
+
+    def _convert_nova_event(self, nova_event: dict[str, Any]):
+        if "usageEvent" in nova_event:
+            record_nova_usage(nova_event["usageEvent"])
+        return super()._convert_nova_event(nova_event)
+
+
+sonic_model = _UsageCapturingNovaSonic(
     model_id=MODEL_ID,
     provider_config={
         "audio": {
@@ -1648,7 +1703,7 @@ def _setup_telemetry() -> None:
     wrapper. Same destination either way; only the wiring differs.
     """
     if os.getenv("AGENT_OBSERVABILITY_ENABLED", "").lower() not in ("true", "1", "yes"):
-        print("[telemetry] AGENT_OBSERVABILITY_ENABLED not set — tracing off (expected outside AgentCore Runtime)")
+        event("telemetry.disabled", reason="AGENT_OBSERVABILITY_ENABLED not set")
         return
 
     # A real SDK provider here means the process was started under
@@ -1662,13 +1717,13 @@ def _setup_telemetry() -> None:
         if isinstance(existing, SdkTracerProvider):
             endpoint = (os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
                         or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or "the distro's default")
-            print(f"[telemetry] already configured by opentelemetry-instrument "
-                  f"(exporting to {endpoint}) — not adding a second exporter")
+            event("telemetry.already_configured", endpoint=endpoint,
+                  by="opentelemetry-instrument")
             return
     except Exception as e:
         # Never fatal: worst case this falls through and configures tracing
         # itself, which is what every non-wrapped run does anyway.
-        print(f"[telemetry] couldn't inspect the current tracer provider ({e}) — configuring one")
+        event("telemetry.provider_probe_failed", error=str(e))
 
     try:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -1692,10 +1747,10 @@ def _setup_telemetry() -> None:
         # it builds an unsigned exporter from OTEL_EXPORTER_OTLP_ENDPOINT.
         telemetry = StrandsTelemetry()
         telemetry.tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
-        print(f"[telemetry] exporting spans to {endpoint} (SigV4)")
+        event("telemetry.configured", endpoint=endpoint, auth="sigv4")
     except Exception as e:
         # Losing traces is not worth losing calls over.
-        print(f"[telemetry] setup failed, continuing without tracing: {e}")
+        event("telemetry.setup_failed", error=str(e))
 
 
 _setup_telemetry()
@@ -1788,7 +1843,7 @@ async def _disconnect_ava(voice_agent: BidiAgent, session: asyncio.Task) -> None
     try:
         await asyncio.wait_for(voice_agent.stop(), timeout=left())
     except Exception as exc:
-        print(f"[handoff] error stopping Ava for the handoff: {exc}")
+        event("handoff.stop_failed", error=str(exc))
 
     # stop() returning is not the same as run() having returned: it may have
     # only just asked the session to close. So wait for the task itself before
@@ -1806,7 +1861,7 @@ async def _disconnect_ava(voice_agent: BidiAgent, session: asyncio.Task) -> None
     if session.done() and not session.cancelled():
         failure = session.exception()
         if failure is not None:
-            print(f"[handoff] Ava's session ended with: {failure}")
+            event("handoff.session_ended_with_error", error=str(failure))
 
 
 async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
@@ -1839,6 +1894,19 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     live_call = handoff.register_call()
     live_call.customer_send = websocket.send_json
 
+    # Everything observable about this call hangs off these four lines, and
+    # they run before the first task is spawned on purpose: a ContextVar is
+    # copied into a task at creation, so anything started after this point —
+    # the gateway load, the model's receive loop, every tool call — inherits
+    # the ids and writes into the same accumulators, while anything already
+    # running (or unrelated, like /ping) keeps the defaults.
+    CALL_ID.set(live_call.call_id)
+    call_usage = CallUsage()
+    CALL_USAGE.set(call_usage)
+    COUNTERS.set({})
+    call_started = time.monotonic()
+    event("call.started")
+
     # Set when a human agent presses Join in the portal. What follows it is a
     # real disconnect, not a mute: Ava's Nova Sonic session is torn down and
     # the rest of the call is a plain audio bridge between the two browsers
@@ -1865,6 +1933,11 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     # teardown doesn't stop it a second time.
     ava_disconnected = False
 
+    # What the call ledger reports as this call's outcome. Overwritten by the
+    # handlers below; "completed" is only correct if nothing else claims it.
+    call_outcome = "completed"
+    call_error: str | None = None
+
     # build_gateway_tools() -> load_tools() starts mcp_client's own
     # background connection lazily; wrapping this in `with mcp_client:`
     # too would start it twice and raise. mcp_client.stop() below is the
@@ -1883,7 +1956,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             try:
                 await websocket.send_json({"type": "bidi_call_metadata_update", "mobile_number": value})
             except Exception as exc:
-                print(f"[mobile sync] failed to notify frontend: {exc}")
+                event("mobile_sync.notify_failed", error=str(exc))
 
         tools_task = asyncio.create_task(
             build_gateway_tools(
@@ -1892,7 +1965,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         )
         prompt_task = asyncio.create_task(get_system_prompt())
         await websocket.accept()
-        print("WebSocket connection accepted")
+        event("call.socket_accepted")
 
         # frontend/index.html sends one JSON metadata message immediately
         # after the socket opens, before any audio — {"type":
@@ -1957,9 +2030,33 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             if isinstance(claimed, str) and _RUNTIME_SESSION_ID_PATTERN.match(claimed.strip()):
                 runtime_session_id = claimed.strip()
         live_call.runtime_session_id = runtime_session_id or None
-        print(f"[handoff] call {live_call.call_id} runtime session: " + (
-            runtime_session_id or "unknown — a portal hosted off this container will be "
-                                  "able to read this call but not join it"))
+
+        # This is the join key for everything outside this process. AgentCore
+        # stamps the same value on every record it writes to
+        # .../USAGE_LOGS/<agent>, which is where the call's billed vCPU-hours
+        # and GB-hours live — so with it on the span and on every log line,
+        # "what did this call cost" spans model tokens (the ledger) and
+        # compute (the usage logs) without a correlation table anywhere.
+        if runtime_session_id:
+            SESSION_ID.set(runtime_session_id)
+        try:
+            from opentelemetry import trace as _trace
+
+            _span = _trace.get_current_span()
+            if _span is not None and _span.is_recording():
+                _span.set_attribute("ava.call_id", live_call.call_id)
+                if runtime_session_id:
+                    _span.set_attribute("session.id", runtime_session_id)
+        except Exception as exc:
+            event("telemetry.span_tagging_failed", error=str(exc))
+
+        event(
+            "call.routed",
+            runtime_session_known=bool(runtime_session_id),
+            note=None if runtime_session_id else (
+                "a portal hosted off this container will be able to read this "
+                "call but not join it"),
+        )
 
         tools = await tools_task
         system_prompt = await prompt_task
@@ -2248,14 +2345,25 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 who = "You" if event.get("role") == "user" else "Ava"
                 text = event.get("current_transcript") or event.get("text")
                 if text and "the call has just connected" not in text:
-                    print(f"{who}: {text}")
+                    # log.info rather than the event() helper: `event` is this
+                    # function's parameter, so the name is bound locally here
+                    # and the module-level logger is the only way through.
+                    log.info(
+                        "%s: %s", who, text,
+                        extra={"event": "transcript.final",
+                               "fields": {"speaker": who, "text": text}},
+                    )
                     if event.get("role") == "user":
                         recent_digits.record(text)
                     # The same finished lines the caller sees, kept for
                     # whoever picks this call up in the agent portal.
                     await live_call.record_transcript(event.get("role") or "assistant", text)
             elif event_type == "bidi_interruption":
-                print(f"[interruption] {event.get('reason')}")
+                log.info(
+                    "interruption",
+                    extra={"event": "call.interruption",
+                           "fields": {"reason": event.get("reason")}},
+                )
 
         async def bridge_caller_to_human() -> None:
             """The rest of the call once Ava has been disconnected.
@@ -2320,17 +2428,19 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             await _disconnect_ava(voice_agent, ava_session)
             ava_disconnected = True
             await live_call.mark_ai_disconnected()
-            print(f"[handoff] Ava disconnected from call {live_call.call_id} — "
-                  f"{live_call.human_label} has the line")
+            event("handoff.ava_disconnected", human_label=live_call.human_label)
             await bridge_caller_to_human()
 
     except WebSocketDisconnect:
-        print("Client disconnected")
+        # The ordinary way a call ends: the caller closed the tab or hung up.
+        # Not an error, and deliberately not folded into the branch below —
+        # counting hangups as failures would make the error rate meaningless.
+        call_outcome = "caller_disconnected"
+        event("call.caller_disconnected")
     except Exception as e:
-        print(f"Error in voice chat: {e}")
-        import traceback
-
-        traceback.print_exc()
+        call_outcome = "error"
+        call_error = f"{type(e).__name__}: {e}"
+        log.exception("call.failed", extra={"event": "call.failed"})
     finally:
         # Deliberately no `return` anywhere in this block: a return in a
         # `finally` replaces whatever the `try` was returning, which here would
@@ -2357,7 +2467,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 await asyncio.wait_for(
                     asyncio.to_thread(mcp_client.stop, None, None, None), timeout=5)
             except Exception as cleanup_error:
-                print(f"Error closing gateway connection: {cleanup_error}")
+                event("gateway.close_failed", error=str(cleanup_error))
         else:
             # Tell any open portal the caller has gone, and keep the call readable
             # there for a while (handoff.RETENTION_SECONDS) so a human following a
@@ -2365,7 +2475,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             try:
                 await live_call.mark_ended()
             except Exception as cleanup_error:
-                print(f"[handoff] error ending call {live_call.call_id}: {cleanup_error}")
+                event("handoff.end_call_failed", error=str(cleanup_error))
             # No explicit memory write here: the session manager persists each turn
             # as it happens, so a call that drops mid-sentence keeps everything said
             # up to that point rather than losing it all at teardown.
@@ -2377,19 +2487,57 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 try:
                     await voice_agent.stop()
                 except Exception as cleanup_error:
-                    print(f"Error stopping voice agent: {cleanup_error}")
+                    event("agent.stop_failed", error=str(cleanup_error))
             try:
                 mcp_client.stop(None, None, None)
             except Exception as cleanup_error:
-                print(f"Error closing gateway connection: {cleanup_error}")
+                event("gateway.close_failed", error=str(cleanup_error))
+
+            # Last, so it reports the call as it finally ended rather than as
+            # it looked before teardown, and wrapped because a ledger line is
+            # never worth an exception escaping a `finally` — that would
+            # replace the real outcome of this connection with a traceback.
+            #
+            # Only this branch emits one. The `handed_to_portal` branch above
+            # is a human agent joining someone else's call: it consumed no
+            # model tokens and has no duration of its own, so a ledger row for
+            # it would be a phantom call diluting every per-call average.
+            try:
+                escalated = live_call.escalation is not None
+                if ava_disconnected:
+                    outcome = "human_handoff"
+                elif call_outcome == "completed" and escalated:
+                    outcome = "escalated"
+                else:
+                    outcome = call_outcome
+                counters = COUNTERS.get()
+                emit_call_ledger(
+                    usage=call_usage,
+                    duration_seconds=time.monotonic() - call_started,
+                    outcome=outcome,
+                    tool_calls=counters.get("tool_calls", 0),
+                    gate_blocks=counters.get("gate_blocks", 0),
+                    escalated=escalated,
+                    human_handoff=ava_disconnected,
+                    tool_errors=counters.get("tool_errors", 0),
+                    transcript_turns=len(live_call.transcript),
+                    error=call_error,
+                )
+            except Exception as ledger_error:
+                event("call.ledger_failed", error=str(ledger_error))
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    print("Starting Ava voice agent server on port 8080...")
-    print(f"Model: {MODEL_ID} (Bedrock region: {BEDROCK_REGION})")
-    print(f"Gateway: {GATEWAY_URL} (signing region: {GATEWAY_REGION})")
+    event(
+        "server.starting",
+        port=8080,
+        model=MODEL_ID,
+        bedrock_region=BEDROCK_REGION,
+        gateway=GATEWAY_URL,
+        gateway_region=GATEWAY_REGION,
+    )
 
     host = "0.0.0.0" if os.getenv("CONTAINER_ENV") else "127.0.0.1"
     uvicorn.run(app, host=host, port=8080)
