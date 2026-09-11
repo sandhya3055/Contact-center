@@ -50,6 +50,7 @@ Deploy: see DEPLOY.md.
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import time
@@ -93,6 +94,10 @@ setup_logging()
 import handoff
 from handoff import LiveCall
 from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
+# Aliased: `tool` is the loop variable for AgentTool objects all over this
+# module, and a decorator that quietly resolves to a gateway tool instead
+# is exactly the class of bug that already cost this file once.
+from strands import tool as strands_tool
 from strands.experimental.bidi import BidiAgent
 from strands.experimental.bidi.models import BidiNovaSonicModel
 from strands.experimental.bidi.tools import stop_conversation
@@ -276,6 +281,23 @@ HIGH_VALUE_CLAIM_THRESHOLD = 100_000
 KEEPALIVE_SECONDS = 5.0
 _SILENT_FRAME_SAMPLES = INPUT_SAMPLE_RATE // 10  # 100ms, same as the browser sends
 
+# How the call ends when Ava is the one ending it (the `end_call` tool).
+#
+# Closing the socket the instant the tool returns cuts the goodbye off
+# mid-word: Nova Sonic has not started speaking yet when the tool result goes
+# back, and the farewell arrives as audio frames over the second or so after.
+# So the line is held open until Ava has been quiet for FAREWELL_SILENCE_
+# SECONDS, which each outgoing audio frame pushes further out, and the timer
+# starts at the tool call rather than at her last frame — otherwise a caller
+# who just finished a long sentence would close the call before Ava got a
+# word in.
+#
+# The cap exists because "quiet for two seconds" never arriving is a real
+# outcome: a model that keeps talking, or an audio stream that never drains,
+# would otherwise hold a billable session open indefinitely.
+FAREWELL_SILENCE_SECONDS = float(os.getenv("FAREWELL_SILENCE_SECONDS", "2.0"))
+FAREWELL_MAX_SECONDS = float(os.getenv("FAREWELL_MAX_SECONDS", "20.0"))
+
 
 def _silent_audio_event() -> dict[str, Any]:
     """A 100ms frame of silence, shaped exactly like the browser's own audio
@@ -325,6 +347,7 @@ Only say something can be done once you've checked it can. If something blocks t
 Three attempts, then a person. After the third failure at the same thing: "I've not been able to get this right, so I'll bring in a colleague who can." Say it once, escalate, don't reopen. Insisting doesn't reset the count.
 Escalate when the caller asks for a person, wants something you can't do, sounds frustrated, disputes a block, or a tool fails twice (retry once first). Send a summary so they never repeat themselves, then stay on the line and start nothing new. If escalation fails, retry once, say you couldn't reach anyone, then ESCALATION_FALLBACK_INSTRUCTION.
 Business rules. Identify the caller with a lookup before discussing account details or taking a claim — that lookup is the identity check, so don't mention or repeat it. Never look up a number the caller hasn't spoken and confirmed digit by digit in this call. If nothing is found, re-check what you sent, then say so plainly and offer a teammate. If there's more than one policy or vehicle, ask which the call is about. An open claim anywhere on the account blocks all new claims — open means anything not closed, settled, paid, rejected or withdrawn, including statuses you don't recognise — and while one exists, don't offer or mention registering another. Never invent policy, claim or account information. If a tool result and the caller disagree, escalate rather than overwrite or argue.
+Ending the call. When the caller confirms they need nothing further — they say goodbye, say that's all, or answer no to your check that there's anything else — call end_call with a short reason, then say a brief, warm goodbye. The line closes on its own once you stop speaking, so don't announce that you're hanging up or wait for another reply. Never use end_call to get out of a question you can't answer, a caller who is upset, or anything you would otherwise escalate: those go to a person, and a call you end is a call nobody calls back.
 """.strip()
 
 def _prompt_region() -> str:
@@ -1864,6 +1887,39 @@ async def _disconnect_ava(voice_agent: BidiAgent, session: asyncio.Task) -> None
             event("handoff.session_ended_with_error", error=str(failure))
 
 
+async def _bounded_teardown(coro: Any, *, failed_event: str, timeout: float) -> None:
+    """Run one teardown step, and abandon it rather than lose the ledger line.
+
+    Every step in the teardown closes something that has usually already
+    broken — that is generally why the call is ending — and none of them has
+    a deadline of its own. `BidiAgent.stop()` is the dangerous one: it awaits
+    `model.stop()`, which closes the Nova Sonic stream over awscrt, and when
+    the HTTP/2 stream was cancelled rather than closed (every call here logs
+    `InvalidStateError: CANCELLED` from awscrt at hangup) that await can
+    simply never return.
+
+    That mattered because `emit_call_ledger` runs after all of this. Observed
+    on 2026-09-11: call 1a7d361b7d27 logged `call.caller_disconnected`, hung
+    in teardown, and was killed by the runtime's ~40-minute pool recycle
+    before writing a ledger line. The call cost real money, held a session,
+    and appears in no metric — the one failure mode this whole module exists
+    to prevent.
+
+    So each step gets a deadline. An abandoned socket close costs nothing;
+    the process is going away regardless. A missing ledger line is a call
+    that, to every cost figure and error rate downstream, never happened.
+    """
+    try:
+        await asyncio.wait_for(coro, timeout)
+    except TimeoutError:
+        # Named separately from the failure case: a hang and an exception want
+        # different fixes, and folding them together hides which one is happening.
+        event(f"{failed_event}.timeout", level=logging.WARNING,
+              timeout_seconds=timeout)
+    except Exception as cleanup_error:
+        event(failed_event, error=str(cleanup_error))
+
+
 async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     """One bidirectional voice call, or None—see voice_chat.
 
@@ -1932,6 +1988,11 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     # Set once a human handoff has already stopped the voice agent, so the
     # teardown doesn't stop it a second time.
     ava_disconnected = False
+    # Whether the Nova Sonic session has already been stopped, by either
+    # of the two paths that stop it. Separate from ava_disconnected,
+    # which means specifically "a human took the call" and is what the
+    # ledger reads as a handoff.
+    ava_stopped = False
 
     # What the call ledger reports as this call's outcome. Overwritten by the
     # handlers below; "completed" is only correct if nothing else claims it.
@@ -2204,6 +2265,66 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         live_call.memory_actor_id = memory_actor_id
         live_call.memory_session_id = memory_session_id
 
+        # --- Ava ending the call herself -----------------------------------
+        #
+        # Until now every call ended because the caller closed the tab, which
+        # left the outcome reading `caller_disconnected` even when the call
+        # had gone perfectly and both sides had said goodbye. A call that
+        # reached its natural end is a different thing from one that dropped,
+        # and the ledger could not tell them apart.
+        #
+        # Ava now asks for the hangup and the connection performs it, rather
+        # than the tool closing anything itself: the tool runs inside the
+        # model's event loop, and tearing that loop's socket out from under
+        # it is how you lose the goodbye and the ledger line together.
+        wants_to_end = asyncio.Event()
+        end_call_reason: list[str] = []
+        # Advanced by every audio frame Ava sends, so the farewell watcher can
+        # tell "still speaking" from "finished".
+        last_ava_audio = time.monotonic()
+
+        @strands_tool
+        def end_call(reason: str) -> str:
+            """End the call. Use only once the caller has confirmed they need nothing further.
+
+            Call this after the caller has said goodbye, said they have no more
+            questions, or otherwise confirmed they are done — and never as a way
+            to get out of a question you cannot answer, a caller who is upset, or
+            a request you would otherwise have to escalate. Those go to a human.
+
+            Say your closing line after calling this, not before: the line stays
+            open until you have finished speaking, then closes on its own.
+
+            Args:
+                reason: A short note for the record of why the call is ending,
+                    e.g. "caller confirmed their claim status and had nothing else".
+            """
+            nonlocal last_ava_audio
+            if live_call.human_on_call:
+                # A human took the call: it is not Ava's to end, and closing
+                # the socket here would hang up on their conversation.
+                return "A human agent is handling this call. Do not end it."
+            end_call_reason.append(reason)
+            # The grace period starts now, not at her last frame — the caller
+            # has just been talking, so Ava's own last audio may be many
+            # seconds old and the watcher would close before she replies.
+            last_ava_audio = time.monotonic()
+            wants_to_end.set()
+            event("call.end_requested", reason=reason)
+            return ("The line will close once you stop speaking. "
+                    "Say a brief, warm goodbye now.")
+
+        async def wait_for_farewell() -> None:
+            """Resolve once Ava has asked to end the call and finished speaking."""
+            await wants_to_end.wait()
+            deadline = time.monotonic() + FAREWELL_MAX_SECONDS
+            while time.monotonic() < deadline:
+                if time.monotonic() - last_ava_audio >= FAREWELL_SILENCE_SECONDS:
+                    return
+                await asyncio.sleep(0.1)
+            event("call.farewell_timeout", level=logging.WARNING,
+                  max_seconds=FAREWELL_MAX_SECONDS)
+
         # Both built on a worker thread, not the event loop: creating the
         # session manager reads this actor's existing events from AWS, and
         # constructing the agent with one attached does further blocking
@@ -2214,7 +2335,7 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         def _build_agent() -> BidiAgent:
             return BidiAgent(
                 model=sonic_model,
-                tools=[*tools, stop_conversation],
+                tools=[*tools, stop_conversation, end_call],
                 system_prompt=system_prompt,
                 session_manager=build_memory_session_manager(
                     memory_actor_id, memory_session_id
@@ -2332,8 +2453,12 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
 
         async def send_to_caller(event: dict[str, Any]) -> None:
             """Ava -> caller, unless a human has taken the call."""
+            nonlocal last_ava_audio
             event_type = event.get("type")
             if event_type == "bidi_audio_stream":
+                # Every frame she sends pushes the hangup further out; see
+                # wait_for_farewell.
+                last_ava_audio = time.monotonic()
                 await live_call.relay_ava_audio(event)
             if live_call.human_on_call and event_type in {"bidi_audio_stream", "bidi_transcript_stream"}:
                 return
@@ -2399,16 +2524,18 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         # it stayed open for the whole call being fed silence, which meant the
         # model was still on the line — listening to a caller who thinks
         # they're talking to a person in private, and one dropped gate away
-        # from speaking over them. Whichever of these two finishes first
+        # from speaking over them. Whichever of these three finishes first
         # decides how the rest of the call goes.
         ava_session = asyncio.create_task(voice_agent.run(
             inputs=[receive_with_greeting_kickoff],
             outputs=[send_to_caller, log_event],
         ))
         taken_over = asyncio.create_task(human_takeover.wait())
+        farewell = asyncio.create_task(wait_for_farewell())
         try:
-            await asyncio.wait(
-                {ava_session, taken_over}, return_when=asyncio.FIRST_COMPLETED)
+            finished, _ = await asyncio.wait(
+                {ava_session, taken_over, farewell},
+                return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
             # This handler is going away entirely (a server shutdown, say).
             # asyncio.wait never cancels what it waits on, so without this the
@@ -2417,15 +2544,40 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             raise
         finally:
             taken_over.cancel()
+            farewell.cancel()
 
+        # Which task won has to be read from `finished`, not from .done():
+        # the `finally` above cancels the losers, and a cancelled task reports
+        # done() too, so by this point every one of them looks finished.
         if ava_session.done():
             # The ordinary end of a call — the caller hung up, the model
             # closed the session, or it failed. result() re-raises whatever
             # run() raised, so failures still reach the handler below exactly
             # as they did when this was a bare `await`.
             ava_session.result()
+        elif farewell in finished:
+            # Ava asked to end the call and has finished saying goodbye.
+            # Her session is stopped here rather than left to lapse: the
+            # microVM is billed for as long as it lives, so the difference
+            # between closing now and closing at the idle timeout is most of
+            # what the call costs.
+            await _disconnect_ava(voice_agent, ava_session)
+            ava_stopped = True
+            call_outcome = "completed"
+            event("call.ended_by_agent",
+                  reason=end_call_reason[0] if end_call_reason else None,
+                  duration_seconds=round(time.monotonic() - call_started, 3))
+            try:
+                # Lets the browser say the call was completed rather than
+                # dropped. Best-effort: the socket closing a moment later is
+                # what actually ends the call.
+                await websocket.send_json(
+                    {"type": "bidi_call_ended", "reason": "completed"})
+            except Exception:
+                pass
         else:
             await _disconnect_ava(voice_agent, ava_session)
+            ava_stopped = True
             ava_disconnected = True
             await live_call.mark_ai_disconnected()
             event("handoff.ava_disconnected", human_label=live_call.human_label)
@@ -2469,34 +2621,20 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             except Exception as cleanup_error:
                 event("gateway.close_failed", error=str(cleanup_error))
         else:
-            # Tell any open portal the caller has gone, and keep the call readable
-            # there for a while (handoff.RETENTION_SECONDS) so a human following a
-            # Slack link a few minutes late still sees the conversation.
-            try:
-                await live_call.mark_ended()
-            except Exception as cleanup_error:
-                event("handoff.end_call_failed", error=str(cleanup_error))
-            # No explicit memory write here: the session manager persists each turn
-            # as it happens, so a call that drops mid-sentence keeps everything said
-            # up to that point rather than losing it all at teardown.
-            try:
-                await websocket.close()
-            except Exception:
-                pass
-            if voice_agent is not None and not ava_disconnected:
-                try:
-                    await voice_agent.stop()
-                except Exception as cleanup_error:
-                    event("agent.stop_failed", error=str(cleanup_error))
-            try:
-                mcp_client.stop(None, None, None)
-            except Exception as cleanup_error:
-                event("gateway.close_failed", error=str(cleanup_error))
-
-            # Last, so it reports the call as it finally ended rather than as
-            # it looked before teardown, and wrapped because a ledger line is
-            # never worth an exception escaping a `finally` — that would
-            # replace the real outcome of this connection with a traceback.
+            # First, before any of the teardown below, because everything it
+            # reports is already settled: the outcome, the counters and the
+            # transcript stop changing the moment the caller goes, and nothing
+            # closed below can alter them. It used to run last, and that cost a
+            # real call — 1a7d361b7d27 on 2026-09-11 hung in teardown and was
+            # killed by the pool recycle before it wrote a line, so a call that
+            # spent money and held a session appears in no metric at all.
+            # Teardown is now bounded as well (see _bounded_teardown), but
+            # ordering is the part that holds even if the process is killed
+            # outright.
+            #
+            # Wrapped because a ledger line is never worth an exception
+            # escaping a `finally` — that would replace the real outcome of
+            # this connection with a traceback.
             #
             # Only this branch emits one. The `handed_to_portal` branch above
             # is a human agent joining someone else's call: it consumed no
@@ -2525,6 +2663,25 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                 )
             except Exception as ledger_error:
                 event("call.ledger_failed", error=str(ledger_error))
+
+            # Tell any open portal the caller has gone, and keep the call readable
+            # there for a while (handoff.RETENTION_SECONDS) so a human following a
+            # Slack link a few minutes late still sees the conversation.
+            await _bounded_teardown(
+                live_call.mark_ended(), failed_event="handoff.end_call_failed", timeout=5)
+            # No explicit memory write here: the session manager persists each turn
+            # as it happens, so a call that drops mid-sentence keeps everything said
+            # up to that point rather than losing it all at teardown.
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            if voice_agent is not None and not ava_stopped:
+                await _bounded_teardown(
+                    voice_agent.stop(), failed_event="agent.stop_failed", timeout=10)
+            await _bounded_teardown(
+                asyncio.to_thread(mcp_client.stop, None, None, None),
+                failed_event="gateway.close_failed", timeout=5)
 
 
 if __name__ == "__main__":
