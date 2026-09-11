@@ -2594,6 +2594,17 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
         call_error = f"{type(e).__name__}: {e}"
         log.exception("call.failed", extra={"event": "call.failed"})
     finally:
+        # The first thing, unconditionally. Three calls on 2026-09-11 logged
+        # their last event (call.caller_disconnected, or call.ended_by_agent)
+        # and then wrote no ledger, with no exception, no call.ledger_failed
+        # and no traceback — and the logs could not say whether this block ran
+        # at all. Since v21 suppressed the /ping access log, a container that
+        # has frozen and one that is simply idle look identical from outside,
+        # so "the process stopped here" is no longer inferable. This line is
+        # the difference between those two, and it costs one log record.
+        event("call.teardown", handed_to_portal=handed_to_portal,
+              outcome=call_outcome, ava_stopped=ava_stopped)
+
         # Deliberately no `return` anywhere in this block: a return in a
         # `finally` replaces whatever the `try` was returning, which here would
         # silently discard the portal attach frame and drop the join.
@@ -2661,8 +2672,17 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                     transcript_turns=len(live_call.transcript),
                     error=call_error,
                 )
-            except Exception as ledger_error:
-                event("call.ledger_failed", error=str(ledger_error))
+            except BaseException as ledger_error:
+                # Deliberately wider than Exception: asyncio.CancelledError is
+                # a BaseException, so a cancelled teardown would otherwise
+                # lose the ledger exactly as silently as the hang this whole
+                # block exists to survive. Cancellation is still re-raised —
+                # reported, not swallowed.
+                event("call.ledger_failed",
+                      error=f"{type(ledger_error).__name__}: {ledger_error}")
+                if isinstance(ledger_error, (asyncio.CancelledError,
+                                             KeyboardInterrupt, SystemExit)):
+                    raise
 
             # Tell any open portal the caller has gone, and keep the call readable
             # there for a while (handoff.RETENTION_SECONDS) so a human following a
