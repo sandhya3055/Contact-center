@@ -1,141 +1,548 @@
 {
   "widgets": [
     {
-      "type": "text", "x": 0, "y": 0, "width": 24, "height": 2,
-      "properties": {
-        "markdown": "# Ava voice agent — calls, cost, health\nFrom the per-call ledger `observability.py` writes to the runtime log group. **Built for low call volume:** the tiles below always show a number, and the charts use 5-minute bars, because a handful of calls on an hourly line chart renders as an invisible dot. Model cost only — AgentCore compute is the larger half of the bill and is billed per vCPU/GB-hour, not per call; see the query at the bottom."
-      }
-    },
-
-    {
-      "type": "metric", "x": 0, "y": 2, "width": 6, "height": 4,
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 6,
+      "height": 4,
       "properties": {
         "title": "Model cost (range total)",
-        "region": "us-west-2", "view": "singleValue", "sparkline": true,
-        "stat": "Sum", "period": 300, "setPeriodToTimeRange": true,
-        "metrics": [ [ "Ava/Calls", "CallCostUsd", "service", "ava-voice-agent", { "label": "USD" } ] ]
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Sum",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "USD"
+            }
+          ]
+        ]
       }
     },
     {
-      "type": "metric", "x": 6, "y": 2, "width": 6, "height": 4,
+      "type": "metric",
+      "x": 6,
+      "y": 0,
+      "width": 6,
+      "height": 4,
       "properties": {
         "title": "Calls",
-        "region": "us-west-2", "view": "singleValue", "sparkline": true,
-        "stat": "Sum", "period": 300, "setPeriodToTimeRange": true,
-        "metrics": [ [ "Ava/Calls", "Calls", "service", "ava-voice-agent", { "label": "calls" } ] ]
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Sum",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "calls"
+            }
+          ]
+        ]
       }
     },
     {
-      "type": "metric", "x": 12, "y": 2, "width": 6, "height": 4,
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 6,
+      "height": 4,
       "properties": {
         "title": "Cost per call (avg)",
-        "region": "us-west-2", "view": "singleValue", "sparkline": true,
-        "stat": "Average", "period": 300, "setPeriodToTimeRange": true,
-        "metrics": [ [ "Ava/Calls", "CallCostUsd", "service", "ava-voice-agent", { "label": "USD/call" } ] ]
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Average",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "USD/call"
+            }
+          ]
+        ]
       }
     },
     {
-      "type": "metric", "x": 18, "y": 2, "width": 6, "height": 4,
+      "type": "metric",
+      "x": 18,
+      "y": 0,
+      "width": 6,
+      "height": 4,
       "properties": {
         "title": "Call duration (avg)",
-        "region": "us-west-2", "view": "singleValue", "sparkline": true,
-        "stat": "Average", "period": 300, "setPeriodToTimeRange": true,
-        "metrics": [ [ "Ava/Calls", "CallDurationSeconds", "service", "ava-voice-agent", { "label": "seconds" } ] ]
-      }
-    },
-
-    {
-      "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
-      "properties": {
-        "title": "Model cost by outcome (USD, 5-min bars)",
-        "region": "us-west-2", "view": "bar", "stacked": true, "stat": "Sum", "period": 300,
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Average",
+        "period": 300,
+        "setPeriodToTimeRange": true,
         "metrics": [
-          [ "Ava/Calls", "CallCostUsd", "service", "ava-voice-agent", "outcome", "completed" ],
-          [ "...", "outcome", "caller_disconnected" ],
-          [ "...", "outcome", "escalated" ],
-          [ "...", "outcome", "human_handoff" ],
-          [ "...", "outcome", "error" ]
-        ],
-        "yAxis": { "left": { "label": "USD", "showUnits": false } }
-      }
-    },
-    {
-      "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
-      "properties": {
-        "title": "Calls by outcome (5-min bars)",
-        "region": "us-west-2", "view": "bar", "stacked": true, "stat": "Sum", "period": 300,
-        "metrics": [
-          [ "Ava/Calls", "Calls", "service", "ava-voice-agent", "outcome", "completed" ],
-          [ "...", "outcome", "caller_disconnected" ],
-          [ "...", "outcome", "escalated" ],
-          [ "...", "outcome", "human_handoff" ],
-          [ "...", "outcome", "error" ]
+          [
+            "Ava/Calls",
+            "CallDurationSeconds",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "seconds"
+            }
+          ]
         ]
       }
     },
-
     {
-      "type": "metric", "x": 0, "y": 12, "width": 8, "height": 6,
+      "type": "metric",
+      "x": 0,
+      "y": 4,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Model cost by outcome (USD per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "completed",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "completed",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "caller_disconnected",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "caller_disconnected",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "escalated",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "escalated",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "human_handoff",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "human_handoff",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "error",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "error",
+              "id": "e4"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 4,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Calls by outcome (per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "completed",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "completed",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "caller_disconnected",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "caller_disconnected",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "escalated",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "escalated",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "human_handoff",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "human_handoff",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "error",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "error",
+              "id": "e4"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 10,
+      "width": 8,
+      "height": 6,
       "properties": {
         "title": "Call duration (seconds)",
-        "region": "us-west-2", "view": "timeSeries", "period": 300,
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stat": "Maximum",
+        "period": 300,
         "metrics": [
-          [ "Ava/Calls", "CallDurationSeconds", "service", "ava-voice-agent", { "stat": "Maximum", "label": "max" } ],
-          [ "...", { "stat": "Average", "label": "avg" } ],
-          [ "...", { "stat": "Minimum", "label": "min" } ]
+          [
+            "Ava/Calls",
+            "CallDurationSeconds",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "longest call in window",
+              "id": "e0"
+            }
+          ]
         ]
       }
     },
     {
-      "type": "metric", "x": 8, "y": 12, "width": 8, "height": 6,
+      "type": "metric",
+      "x": 8,
+      "y": 10,
+      "width": 8,
+      "height": 6,
       "properties": {
         "title": "Tool calls and gate blocks",
-        "region": "us-west-2", "view": "bar", "stat": "Sum", "period": 300,
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stat": "Sum",
+        "period": 300,
         "metrics": [
-          [ "Ava/Calls", "ToolCalls", "service", "ava-voice-agent" ],
-          [ "Ava/Calls", "GateBlocks", "service", "ava-voice-agent" ]
+          [
+            "Ava/Calls",
+            "ToolCalls",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "tool calls",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "GateBlocks",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "gate blocks",
+              "id": "e1"
+            }
+          ]
         ]
       }
     },
     {
-      "type": "metric", "x": 16, "y": 12, "width": 8, "height": 6,
+      "type": "metric",
+      "x": 16,
+      "y": 10,
+      "width": 8,
+      "height": 6,
       "properties": {
-        "title": "Tokens by modality — text dominates input, speech dominates output",
-        "region": "us-west-2", "view": "bar", "stacked": true, "stat": "Sum", "period": 300,
+        "title": "Tokens by modality (per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": true,
+        "stat": "Sum",
+        "period": 300,
         "metrics": [
-          [ "Ava/Calls", "TextInTokens", "service", "ava-voice-agent" ],
-          [ "Ava/Calls", "SpeechInTokens", "service", "ava-voice-agent" ],
-          [ "Ava/Calls", "SpeechOutTokens", "service", "ava-voice-agent" ],
-          [ "Ava/Calls", "TextOutTokens", "service", "ava-voice-agent" ]
+          [
+            "Ava/Calls",
+            "TextInTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "TextInTokens",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "SpeechInTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "SpeechInTokens",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "SpeechOutTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "SpeechOutTokens",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "TextOutTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "TextOutTokens",
+              "id": "e3"
+            }
+          ]
         ]
       }
     },
-
     {
-      "type": "log", "x": 0, "y": 18, "width": 24, "height": 7,
+      "type": "log",
+      "x": 0,
+      "y": 16,
+      "width": 24,
+      "height": 7,
       "properties": {
-        "title": "Call ledger — one row per finished call",
+        "title": "Call ledger \u2014 one row per finished call",
         "region": "us-west-2",
-        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| fields @timestamp, call_id, outcome, CallDurationSeconds as secs, CallCostUsd as usd, ToolCalls as tools, GateBlocks as gates, InputTokens as tok_in, OutputTokens as tok_out, transcript_turns as turns, usage_mode, cost_priced\n| filter event = \"call.ledger\"\n| sort @timestamp desc\n| limit 50",
-        "view": "table"
+        "view": "table",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| fields @timestamp, call_id, outcome, CallDurationSeconds as secs, CallCostUsd as usd, ToolCalls as tools, GateBlocks as gates, InputTokens as tok_in, OutputTokens as tok_out, transcript_turns as turns, usage_mode, cost_priced\n| filter event = \"call.ledger\"\n| sort @timestamp desc\n| limit 50"
       }
     },
     {
-      "type": "log", "x": 0, "y": 25, "width": 12, "height": 6,
+      "type": "log",
+      "x": 0,
+      "y": 23,
+      "width": 12,
+      "height": 6,
       "properties": {
-        "title": "Errors and refusals (agent + tool Lambda, one query)",
+        "title": "Errors and refusals (agent + tool Lambda)",
         "region": "us-west-2",
-        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT' | SOURCE '/aws/lambda/insurarncae-voice-agent-mcp-tool'\n| fields @timestamp, service, call_id, session_id, event, msg, error\n| filter level in [\"ERROR\", \"WARNING\"]\n| sort @timestamp desc\n| limit 50",
-        "view": "table"
+        "view": "table",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT' | SOURCE '/aws/lambda/insurarncae-voice-agent-mcp-tool'\n| fields @timestamp, service, call_id, session_id, event, msg, error\n| filter level in [\"ERROR\", \"WARNING\"]\n| sort @timestamp desc\n| limit 50"
       }
     },
     {
-      "type": "log", "x": 12, "y": 25, "width": 12, "height": 6,
+      "type": "log",
+      "x": 12,
+      "y": 23,
+      "width": 12,
+      "height": 6,
       "properties": {
-        "title": "Runtime compute per session — the other, larger half of cost",
+        "title": "Runtime compute per session \u2014 the larger half of cost",
         "region": "us-west-2",
-        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields attributes.session.id as session_id, metrics.`agent.runtime.vcpu.hours.used` as vcpu_h, metrics.`agent.runtime.memory.gb_hours.used` as gb_h\n| stats sum(vcpu_h) as vcpu_hours, sum(gb_h) as gb_hours by session_id\n| sort gb_hours desc\n| limit 25",
-        "view": "table"
+        "view": "table",
+        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields attributes.session.id as session_id, metrics.`agent.runtime.vcpu.hours.used` as vcpu_h, metrics.`agent.runtime.memory.gb_hours.used` as gb_h\n| stats sum(vcpu_h) as vcpu_hours, sum(gb_h) as gb_hours by session_id\n| sort gb_hours desc\n| limit 25"
       }
     }
   ]
