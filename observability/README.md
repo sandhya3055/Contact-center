@@ -90,15 +90,31 @@ aws lambda invoke --region us-west-2 --function-name ava-cost-publisher \
 ALARM_TOPIC_ARN=arn:aws:sns:us-west-2:...:ops ./observability/apply.sh
 ```
 
-Applied 2026-09-11: the `Ava-Observability` dashboard and four alarms
+Applied 2026-09-11: the `Ava-Observability` dashboard and five alarms
 (`Ava-DailyModelCost-High`, `Ava-CostPerCall-High`, `Ava-CallErrors`,
-`Ava-NoLedgerData`) exist in us-west-2. They read `INSUFFICIENT_DATA` until a
-build carrying `observability.py` is actually deployed.
+`Ava-NoLedgerData`, `Ava-LedgerLost`) exist in us-west-2, along with the
+`Ava-CallsDisconnected` metric filter.
 
 `Ava-NoLedgerData` uses `--treat-missing-data breaching` on purpose — silence
 is the failure this whole change exists to catch — so it will go to ALARM
 before the first deploy. That is correct behaviour, not a bug, and it is
 harmless while `ALARM_TOPIC_ARN` is unset and no action is attached.
+
+`Ava-LedgerLost` is the one that catches a subtler failure, and it exists
+because the obvious alarm missed a real outage. `Ava-NoLedgerData` counts
+ledger lines alone, so "nobody rang" and "three people rang and all three
+vanished" look identical to it. On 2026-09-11 two calls in a row ran fine,
+cost money, and wrote no ledger; every widget stayed calm and no alarm moved.
+
+So `Ava-CallsDisconnected` counts hangups straight out of the log stream — a
+metric filter, because the EMF block only exists *on* a ledger line, which
+makes a missing ledger invisible to every metric in `Ava/Calls` by definition
+— and the alarm watches `FILL(disc,0) - FILL(ledg,0)`. Every hangup owes a
+ledger line; the gap between them is the number of calls that disappeared.
+
+A metric filter is not retroactive: it only sees events written after it was
+created, so the series starts empty and the alarm sits in `INSUFFICIENT_DATA`
+until the next call.
 
 Alarm thresholds are placeholders. Set them from a week of real ledger data —
 a guessed threshold either never fires or always does, and both teach people

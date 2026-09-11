@@ -15,6 +15,7 @@ SERVICE="${SERVICE:-ava-voice-agent}"
 # Where an alarm sends notifications. Leave unset to create alarms with no
 # action — they still show state in the console, they just won't page anyone.
 ALARM_TOPIC_ARN="${ALARM_TOPIC_ARN:-}"
+LOG_GROUP="${LOG_GROUP:-/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> dashboard"
@@ -75,6 +76,44 @@ aws cloudwatch put-metric-alarm --region "$REGION" \
   --statistic Sum --period 21600 --evaluation-periods 1 \
   --threshold 1 --comparison-operator LessThanThreshold \
   --treat-missing-data breaching ${alarm_actions[@]+"${alarm_actions[@]}"}
+
+# Counts hangups straight out of the log stream, so it can be compared against
+# the ledger the hangup was supposed to produce. There is no such metric
+# otherwise: the EMF block only exists on a ledger line, so a call whose ledger
+# never got written is invisible to every metric in Ava/Calls by definition.
+#
+# Not retroactive — a metric filter only sees log events written after it
+# exists, so the series starts empty and the alarm below sits in
+# INSUFFICIENT_DATA until the next call.
+echo "==> metric filter"
+aws logs put-metric-filter --region "$REGION" \
+  --log-group-name "$LOG_GROUP" \
+  --filter-name Ava-CallsDisconnected \
+  --filter-pattern '{ $.event = "call.caller_disconnected" }' \
+  --metric-transformations \
+    metricName=CallsDisconnected,metricNamespace=Ava/Calls,metricValue=1,defaultValue=0
+echo "    Ava/Calls CallsDisconnected"
+
+# Every caller hangup owes a ledger line. When that stops being true, the call
+# still happened, still cost money, and shows up in nothing — which is exactly
+# what happened on 2026-09-11, twice, before v21: teardown froze the event loop
+# and emit_call_ledger never ran.
+#
+# Ava-NoLedgerData above cannot catch this. It watches the ledger count alone,
+# so "nobody rang" and "three people rang and all three vanished" look
+# identical to it. This one watches the gap between the two.
+echo "==> lost-ledger alarm"
+aws cloudwatch put-metric-alarm --region "$REGION" \
+  --alarm-name Ava-LedgerLost \
+  --alarm-description "A call disconnected but wrote no ledger line: the call happened, cost money, and appears in no metric" \
+  --metrics "[
+    {\"Id\":\"disc\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"Ava/Calls\",\"MetricName\":\"CallsDisconnected\"},\"Period\":3600,\"Stat\":\"Sum\"},\"ReturnData\":false},
+    {\"Id\":\"ledg\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"Ava/Calls\",\"MetricName\":\"Calls\",\"Dimensions\":[{\"Name\":\"service\",\"Value\":\"$SERVICE\"}]},\"Period\":3600,\"Stat\":\"Sum\"},\"ReturnData\":false},
+    {\"Id\":\"lost\",\"Expression\":\"FILL(disc,0) - FILL(ledg,0)\",\"Label\":\"calls that ended with no ledger line\",\"ReturnData\":true}
+  ]" \
+  --comparison-operator GreaterThanThreshold --threshold 0 \
+  --evaluation-periods 1 --datapoints-to-alarm 1 \
+  --treat-missing-data notBreaching ${alarm_actions[@]+"${alarm_actions[@]}"}
 
 echo "==> done"
 aws cloudwatch describe-alarms --region "$REGION" --alarm-name-prefix Ava- \
