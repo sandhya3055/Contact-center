@@ -387,17 +387,34 @@ def emit_call_ledger(
     human_handoff: bool = False,
     **extra: Any,
 ) -> None:
-    """One line per finished call: what happened, what it consumed, what it cost.
+    """Record a finished call, as **two** log lines.
 
-    Written as CloudWatch EMF, so the numeric fields become metrics in
-    ``Ava/Calls`` automatically. `outcome` is a dimension because that is the
-    cut that actually gets asked for — "escalated calls cost 3x and there are
-    more of them this week" is a dashboard line rather than a query.
+    ``call.ledger`` is the one to read: every fact about the call, no
+    machinery. ``call.metrics`` is the CloudWatch Embedded Metric Format
+    event — the ``_aws`` block plus the bare numbers it names — and exists
+    only to be parsed.
 
-    CallCostUsd is included in the metric list **only when it could be
-    computed**. An unpriced call still emits every token count and a
-    `cost_priced: false` field; what it must not do is publish a $0 cost, which
-    would drag the average down and read as "calls are cheap" rather than
+    They were one line until the ``_aws`` block turned out to dominate it.
+    EMF requires that block at the *root* of the same event as the values it
+    publishes, and it has to enumerate every metric by name and unit, so a
+    ledger event carried ~35 fields of `_aws.CloudWatchMetrics.0.Metrics.N.*`
+    around 20 of actual content. Expanding a call in the console meant
+    scrolling past the machinery to reach the call, and Logs Insights offered
+    those fields for autocomplete ahead of the real ones.
+
+    Splitting costs one extra log line per call and duplicates about ten
+    numbers. It buys a ledger row that reads like a record of a phone call.
+    The numbers stay on ``call.ledger`` too, so every query, dashboard widget
+    and the reconcile script go on working against it alone — only the metric
+    *extraction* happens on the other line.
+
+    `outcome` is a metric dimension because it is the cut that actually gets
+    asked for: "escalated calls cost 3x and there are more this week" should
+    be a dashboard line, not a query.
+
+    CallCostUsd is published **only when it could be computed**. An unpriced
+    call still records every token count and `cost_priced: false`; what it
+    must not do is publish a $0, which reads as "calls are cheap" rather than
     "cost is not configured".
     """
     cost = usage.cost_usd()
@@ -445,22 +462,36 @@ def emit_call_ledger(
         metrics.append({"Name": "CallCostUsd", "Unit": "None"})
         body["CallCostUsd"] = round(cost, 6)
 
-    body["_aws"] = {
-        "Timestamp": int(time.time() * 1000),
-        "CloudWatchMetrics": [
-            {
-                "Namespace": EMF_NAMESPACE,
-                # Both cuts: the unconditioned total, and the per-outcome
-                # split. A metric is only queryable along dimension sets that
-                # were declared when it was written, so leaving ["service"]
-                # out would mean no way to ask for total spend.
-                "Dimensions": [["service"], ["service", "outcome"]],
-                "Metrics": metrics,
-            }
-        ],
-    }
-
-    # print, not the logger: EMF requires this exact object at the root of the
-    # log event, and the JSON formatter would nest it under its own envelope
-    # where CloudWatch will not look for it.
+    # Line 1 — the readable record. No `_aws`, so nothing here exists for
+    # CloudWatch's benefit.
     print(json.dumps(body, default=str))
+
+    # Line 2 — the EMF event. Carries the dimensions and only the values it
+    # publishes; every descriptive field above is left off, since nothing
+    # reads this line.
+    emf: dict[str, Any] = {
+        "event": "call.metrics",
+        "service": SERVICE,
+        "outcome": outcome,
+        "_aws": {
+            "Timestamp": int(time.time() * 1000),
+            "CloudWatchMetrics": [
+                {
+                    "Namespace": EMF_NAMESPACE,
+                    # Both cuts: the unconditioned total, and the per-outcome
+                    # split. A metric is only queryable along dimension sets
+                    # declared when it was written, so dropping ["service"]
+                    # would mean no way to ask for total spend.
+                    "Dimensions": [["service"], ["service", "outcome"]],
+                    "Metrics": metrics,
+                }
+            ],
+        },
+    }
+    for metric in metrics:
+        emf[metric["Name"]] = body[metric["Name"]]
+
+    # print, not the logger: EMF requires this object at the root of the log
+    # event, and the JSON formatter would nest it inside its own envelope
+    # where CloudWatch will not look for it.
+    print(json.dumps(emf, default=str))
