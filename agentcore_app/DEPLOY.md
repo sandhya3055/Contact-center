@@ -147,6 +147,16 @@ set here too, or accept that the deployed agent doesn't have it.
 "HTTP includes both REST (`/invocations`) and WebSocket (`/ws`) endpoints."
 There's no separate `WEBSOCKET` protocol value.
 
+> **The live runtime has diverged from this example.** As of 2026-09-11
+> `ava_voice_agent-TVSWmk7feq` runs with `BEDROCK_REGION=us-west-2`, no
+> `OTEL_EXPORTER_OTLP_ENDPOINT` at all (the localhost:4318 trap described
+> below was already removed), plus `OTEL_TRACES_EXPORTER`,
+> `UNIFIED_TRACES_DESTINATION_ENABLED`, `BEDROCK_PROMPT_ID` and the Slack
+> settings. Always read the current environment back with
+> `get_agent_runtime` before an update — the call replaces rather than
+> merges, so anything you don't pass is deleted. `observability/deploy.sh`
+> does that for you.
+
 `BEDROCK_REGION` is set to `us-east-1` above (Nova 2 Sonic's default
 region) independently of `AWS_REGION` (your gateway's region, `us-west-2`)
 — they don't have to match; `strands_agent.py` already reads them as
@@ -397,12 +407,22 @@ mapping, or `usage_mode` is wrong.
 
 ### Bedrock model invocation logging is per-region
 
-Nova Sonic runs in `BEDROCK_REGION` (`us-east-1`), not `AWS_REGION`
-(`us-west-2`) — so invocation logging configured in us-west-2 captures none of
-this agent's model traffic. It is now enabled in **both**; us-east-1 needed its
-own delivery role (`bedrock-model-logging-us-east-1`), because the us-west-2
-one is hard-scoped to that region in both its trust policy's `aws:SourceArn`
-and its permissions policy's log-group ARN.
+Model traffic from this project lands in **two** regions, and each needs its
+own logging configuration:
+
+- **The deployed runtime calls us-west-2.** `BEDROCK_REGION` on
+  `ava_voice_agent-TVSWmk7feq` is `us-west-2`, not the `us-east-1` the
+  §3 example above shows — that example is the original setup and the live
+  runtime has since diverged from it. Read the runtime, not this file, before
+  acting on the region.
+- **Local runs and evals call us-east-1**, via `AWS_REGION` in the repo's
+  `.env`. Cost Explorer shows both `USW2-NovaSonic2.0-*` and
+  `USE1-NovaSonic2.0-*` usage types for exactly this reason.
+
+Invocation logging is now on in both. us-east-1 needed its own delivery role
+(`bedrock-model-logging-us-east-1`), because the us-west-2 one is hard-scoped
+to that region in both its trust policy's `aws:SourceArn` and its permissions
+policy's log-group ARN.
 
 Note that bidirectional-streaming coverage in invocation logs is thinner than
 for `InvokeModel`, so treat an empty `model-invocation-logs` group in us-east-1
