@@ -335,8 +335,21 @@ Three things it adds, and why each one was missing:
 per modality:
 
 ```
-NOVA_SONIC_PRICES_JSON={"speech_in":X,"text_in":X,"speech_out":X,"text_out":X}
+NOVA_SONIC_PRICES_JSON={"speech_in":3.00,"text_in":0.319,"speech_out":12.00,"text_out":2.651}
 ```
+
+Those are the **us-west-2** rates, derived from this account's own Cost
+Explorer: cost divided by `UsageQuantity` for each `USW2-NovaSonic2.0-*`
+usage type, with quantity in units of 1,000 tokens. That unit is an
+inference, but a safe one — the speech rates come out at exactly 3.00 and
+12.00, which no other unit produces. us-east-1 prices text differently
+(0.33 / 2.75), so re-derive if `BEDROCK_REGION` ever moves. `observability/
+reconcile.py` checks the whole thing against the actual bill.
+
+Real numbers, not placeholders: a malformed value is treated exactly like an
+unset one — `pricing.config_invalid` at ERROR, calls unaffected, no cost. If
+ledger lines read `cost_priced: false` while the variable is set, grep that
+event first.
 
 It deliberately has no default. Unset, every token count is still recorded
 and the ledger says `cost_priced: false`, and **no** `CallCostUsd` metric is
