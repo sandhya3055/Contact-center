@@ -539,10 +539,10 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "Runtime compute per session \u2014 the larger half of cost",
+        "title": "Runtime compute per session \u2014 seconds_alive vs call duration is where the money goes",
         "region": "us-west-2",
         "view": "table",
-        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields attributes.session.id as session_id, metrics.`agent.runtime.vcpu.hours.used` as vcpu_h, metrics.`agent.runtime.memory.gb_hours.used` as gb_h\n| stats sum(vcpu_h) as vcpu_hours, sum(gb_h) as gb_hours by session_id\n| sort gb_hours desc\n| limit 25"
+        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields `attributes.session.id` as session_id,\n         `metrics.agent.runtime.vcpu.hours.used` as vcpu_h,\n         `metrics.agent.runtime.memory.gb_hours.used` as gb_h\n| stats count(*) as seconds_alive,\n        sum(vcpu_h) as vcpu_hours,\n        sum(gb_h) as gb_hours,\n        sum(vcpu_h)*0.0895 + sum(gb_h)*0.00945 as compute_usd\n    by session_id\n| sort compute_usd desc\n| limit 25"
       }
     }
   ]
