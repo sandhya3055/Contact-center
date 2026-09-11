@@ -54,6 +54,36 @@ Two things worth knowing before reading any of these numbers:
 Set `NOVA_SONIC_PRICES_JSON` on the runtime or there is no cost figure at all
 — by design. See `.env.example`.
 
+## Daily cost metrics (`Ava/Cost`)
+
+A CloudWatch dashboard can only render CloudWatch metrics and Logs Insights
+queries — there is no widget that talks to Cost Explorer. So container image
+storage, AgentCore Memory, eval traffic and portal hosting could not appear
+on the dashboard at all. `cost_publisher.py` closes that: a Lambda that reads
+CE once a day and writes each category into `Ava/Cost` as a real metric.
+
+```bash
+./observability/deploy_cost_publisher.sh      # idempotent; creates or updates
+```
+
+**The x-axis is when the figure was learned, not when the money was spent**,
+and the two differ by ~3 days. That is a workaround, not a choice: backdated
+PutMetricData is accepted here and then never readable — ListMetrics shows
+the metric, GetMetricStatistics returns nothing for it, permanently. Verified
+with a probe (current timestamp reads back in under a minute, three days back
+never does). Two consequences: a spike on the chart means spend spiked ~3
+days earlier, and **history cannot be backfilled** — the series starts at
+first run. Use `cost_report.py` for anything before that.
+
+The schedule step needs `events:PutRule`, which is denied for the usual IAM
+user. Until it is granted the Lambda exists but nothing triggers it; invoke
+by hand with:
+
+```bash
+aws lambda invoke --region us-west-2 --function-name ava-cost-publisher \
+  --payload '{}' --cli-binary-format raw-in-base64-out /dev/stdout
+```
+
 ## Applying the dashboard and alarms
 
 ```bash

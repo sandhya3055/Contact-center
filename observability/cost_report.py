@@ -45,63 +45,9 @@ REGION = "us-west-2"
 USAGE_LOG_GROUP = "/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq"
 ECR_REPOS = ["ava-voice-agent", "insurance-voice-agent"]
 
-# Rates derived from this account's own bill (cost / UsageQuantity). Used only
-# for the per-session estimate below; every figure in the main table is what
-# AWS actually charged.
-VCPU_RATE, GB_RATE = 0.0895, 0.00945
-
-# Bedrock model families that are not Ava's voice path — evals, judges, prompt
-# tooling. Kept separate so experiment spend never reads as production cost.
-OTHER_MODEL_HINTS = (
-    "nova2.0lite", "novalite", "novapro", "llama4", "kimi", "gpt-oss",
-    "nemotron", "glm", "minimax", "qwen", "apo-v1", "titan", "claude",
-)
-
-# (category, "what covers it today") in table order.
-CATEGORIES = [
-    ("AgentCore Runtime (compute)", "dashboard: compute widget"),
-    ("Nova Sonic — production (us-west-2)", "ledger: CallCostUsd"),
-    ("Nova Sonic — dev/eval (us-east-1)", "nothing"),
-    ("AgentCore Memory", "nothing"),
-    ("AgentCore Gateway", "nothing"),
-    ("Other Bedrock models (evals, prompt tooling)", "nothing"),
-    ("Container images (ECR)", "nothing"),
-    ("Observability (CloudWatch, X-Ray)", "nothing"),
-    ("Portal hosting (Amplify)", "nothing"),
-    ("Glue (Lambda, DynamoDB, API GW, S3)", "nothing"),
-]
-
-
-def classify(service: str, usage_type: str) -> str | None:
-    """Bucket one CE line, or None if it belongs to another project."""
-    ut = usage_type.lower()
-    svc = service.lower()
-
-    if "runtime:consumption-based" in ut:
-        return "AgentCore Runtime (compute)"
-    if "memory:consumption-based" in ut:
-        return "AgentCore Memory"
-    if "gateway:consumption-based" in ut:
-        return "AgentCore Gateway"
-    if "novasonic" in ut:
-        # Region decides production vs dev: the deployed runtime calls
-        # us-west-2, while local runs and evals use us-east-1 via .env.
-        return ("Nova Sonic — dev/eval (us-east-1)" if ut.startswith("use1")
-                else "Nova Sonic — production (us-west-2)")
-    if any(h in ut for h in OTHER_MODEL_HINTS):
-        return "Other Bedrock models (evals, prompt tooling)"
-    if "bedrock" in svc:
-        return "Other Bedrock models (evals, prompt tooling)"
-    if "container registry" in svc or svc.endswith("ecr)"):
-        return "Container images (ECR)"
-    if "cloudwatch" in svc or "x-ray" in svc:
-        return "Observability (CloudWatch, X-Ray)"
-    if "amplify" in svc:
-        return "Portal hosting (Amplify)"
-    if svc in ("aws lambda", "amazon dynamodb", "amazon api gateway",
-               "amazon simple storage service"):
-        return "Glue (Lambda, DynamoDB, API GW, S3)"
-    return None
+# The classifier and category list live in cost_categories so this report and
+# the daily cost_publisher Lambda can never disagree about what a line is.
+from cost_categories import CATEGORIES, GB_RATE, VCPU_RATE, classify  # noqa: E402
 
 
 def fetch(days: int, end: dt.date):

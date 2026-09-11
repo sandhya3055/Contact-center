@@ -112,6 +112,312 @@
       "type": "metric",
       "x": 0,
       "y": 4,
+      "width": 16,
+      "height": 8,
+      "properties": {
+        "title": "AWS cost by category (daily \u2014 plotted when learned, ~3 days after the spend)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "RuntimeCompute",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "RuntimeCompute",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ModelProduction",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "ModelProduction",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ModelDevEval",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "ModelDevEval",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "AgentCoreMemory",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "AgentCoreMemory",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "AgentCoreGateway",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "AgentCoreGateway",
+              "id": "e4"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "OtherBedrockModels",
+            {
+              "id": "m5",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m5,0)",
+              "label": "OtherBedrockModels",
+              "id": "e5"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ContainerImages",
+            {
+              "id": "m6",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m6,0)",
+              "label": "ContainerImages",
+              "id": "e6"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "Observability",
+            {
+              "id": "m7",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m7,0)",
+              "label": "Observability",
+              "id": "e7"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "PortalHosting",
+            {
+              "id": "m8",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m8,0)",
+              "label": "PortalHosting",
+              "id": "e8"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "Glue",
+            {
+              "id": "m9",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m9,0)",
+              "label": "Glue",
+              "id": "e9"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD/day",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 4,
+      "width": 8,
+      "height": 4,
+      "properties": {
+        "title": "This agent vs rest of account (daily, ~3-day lag)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "this agent"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "other-projects",
+            {
+              "label": "other projects"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD/day",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 8,
+      "width": 4,
+      "height": 4,
+      "properties": {
+        "title": "ECR images",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "EcrImages",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "images"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 20,
+      "y": 8,
+      "width": 4,
+      "height": 4,
+      "properties": {
+        "title": "ECR storage",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "EcrStorageGB",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "GB"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 12,
       "width": 12,
       "height": 6,
       "properties": {
@@ -229,7 +535,7 @@
     {
       "type": "metric",
       "x": 12,
-      "y": 4,
+      "y": 12,
       "width": 12,
       "height": 6,
       "properties": {
@@ -341,7 +647,7 @@
     {
       "type": "metric",
       "x": 0,
-      "y": 10,
+      "y": 18,
       "width": 8,
       "height": 6,
       "properties": {
@@ -374,7 +680,7 @@
     {
       "type": "metric",
       "x": 8,
-      "y": 10,
+      "y": 18,
       "width": 8,
       "height": 6,
       "properties": {
@@ -424,7 +730,7 @@
     {
       "type": "metric",
       "x": 16,
-      "y": 10,
+      "y": 18,
       "width": 8,
       "height": 6,
       "properties": {
@@ -509,7 +815,7 @@
     {
       "type": "log",
       "x": 0,
-      "y": 16,
+      "y": 24,
       "width": 24,
       "height": 7,
       "properties": {
@@ -522,7 +828,7 @@
     {
       "type": "log",
       "x": 0,
-      "y": 23,
+      "y": 31,
       "width": 12,
       "height": 6,
       "properties": {
@@ -535,7 +841,7 @@
     {
       "type": "log",
       "x": 12,
-      "y": 23,
+      "y": 31,
       "width": 12,
       "height": 6,
       "properties": {
