@@ -300,6 +300,18 @@ Three things it adds, and why each one was missing:
    way past. This is a real coupling to `strands-agents==1.54.0` — if a
    version bump removes the method, the container fails at import rather
    than quietly costing nothing.
+
+   **Do not use `gen_ai.usage.*` on the `bidi_session` span for cost.** Those
+   attributes are inflated by roughly two orders of magnitude. Strands' bidi
+   event loop does `self._accumulated_input_tokens += event.input_tokens`
+   (`strands/experimental/bidi/agent/loop.py`) against a Nova event whose
+   fields are named `totalInputTokens` and whose payload carries both a
+   `details.delta` and a `details.total` — a running total, summed as though
+   it were a delta. Measured against this account's own bill: spans reported
+   4.57M output tokens for 2026-09-09, and Cost Explorer billed a quantity
+   two orders of magnitude smaller for the same day. The `+=` is presumably
+   correct for Gemini and OpenAI Realtime, which is how it survives upstream.
+   `CallUsage` is the correct number; the span attribute is not.
 3. **A ledger line per finished call, as CloudWatch EMF.** CloudWatch parses
    `_aws` out of any log group and publishes the fields as real metrics, so
    `Ava/Calls` gets `CallCostUsd`, `CallDurationSeconds`, `InputTokens`,
@@ -323,14 +335,23 @@ published — publishing a $0 would read as "calls are cheap" rather than
 value in SSM Parameter Store and injecting it at deploy time, so a price
 change isn't a redeploy.
 
+**Cumulative or delta is detected, not assumed.** Getting this wrong in
+either direction scales the whole cost figure, so `CallUsage` decides from
+the data: totals that never decrease are read as cumulative (keep the last),
+and the first value that drops proves they are per-interval deltas (sum them
+all, including the ones already seen). The conclusion appears on every ledger
+line as `usage_mode`, so a wrong inference shows up in the data rather than
+silently mispricing. If every call reports `usage_mode: delta`, the detection
+fired — check it against a `nova.usage.raw` sample before trusting the totals.
+
 **Verify the token field names on the first deploy.** The exact keys inside
 `usageEvent.details` are the one thing here never confirmed against live
 traffic — Strands discards that sub-object, and DEBUG logging has never been
 on in this container, so no sample of it exists anywhere in CloudWatch.
 `CallUsage.update()` reads it defensively (an unexpected shape degrades to
 "totals only, no cost", never to an exception in the model's receive loop),
-and the first usage event of each process is logged verbatim as
-`nova.usage.raw`. After the next deploy, make one call and read it:
+and the first three usage events of each process are logged verbatim as
+`nova.usage.raw`. After the next deploy, make one call and read them:
 
 ```bash
 aws logs filter-log-events --region us-west-2 \
@@ -352,10 +373,27 @@ fields @timestamp, attributes.session.id as session_id,
 | stats sum(vcpu_h) as vcpu, sum(gb_h) as gb by session_id
 ```
 
-Both are estimates. Reconcile monthly against Cost Explorer — which needs
-`ce:GetCostAndUsage` granted to whoever checks, and a `Project=ava-voice-agent`
-cost allocation tag activated in Billing. More than ~10% drift means the price
-table or the modality mapping is wrong.
+Both are estimates. Reconcile monthly against Cost Explorer — and **filter to
+`RECORD_TYPE = Usage`**, or the answer is always zero: this account's spend is
+currently fully offset by credits, so net `UnblendedCost` grouped by service
+nets to `-0.00` across the board while gross usage is real.
+
+```bash
+aws ce get-cost-and-usage --region us-east-1 \
+  --time-period Start=<YYYY-MM-DD>,End=<YYYY-MM-DD> --granularity MONTHLY \
+  --metrics UnblendedCost UsageQuantity \
+  --filter '{"And":[{"Dimensions":{"Key":"RECORD_TYPE","Values":["Usage"]}},
+                    {"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock","Amazon Bedrock AgentCore"]}}]}' \
+  --group-by Type=DIMENSION,Key=USAGE_TYPE
+```
+
+The `USE1-NovaSonic2.0-*-tokens` usage types are what `CallCostUsd` should add
+up to; `USW2-Runtime:Consumption-based:*` is the compute half. Worth knowing
+before you tune anything: over 2026-09-01→11 this agent's gross usage was
+**$21.83 AgentCore vs $3.35 Bedrock** — compute outweighs model tokens about
+6.5:1, so the ledger's `CallCostUsd` only ever explains a minority of the bill.
+More than ~10% drift on the Bedrock half means the price table, the modality
+mapping, or `usage_mode` is wrong.
 
 ### Bedrock model invocation logging is per-region
 

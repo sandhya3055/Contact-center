@@ -23,6 +23,9 @@ aws cloudwatch put-dashboard --region "$REGION" \
   --dashboard-body "file://$HERE/dashboard.json" >/dev/null
 echo "    https://$REGION.console.aws.amazon.com/cloudwatch/home?region=$REGION#dashboards/dashboard/Ava-Observability"
 
+# Expanded below with the ${x[@]+...} guard rather than bare "${x[@]}":
+# macOS ships bash 3.2, where expanding an empty array under `set -u` is an
+# "unbound variable" error rather than nothing at all.
 alarm_actions=()
 [ -n "$ALARM_TOPIC_ARN" ] && alarm_actions=(--alarm-actions "$ALARM_TOPIC_ARN")
 
@@ -37,7 +40,7 @@ aws cloudwatch put-metric-alarm --region "$REGION" \
   --dimensions Name=service,Value="$SERVICE" \
   --statistic Sum --period 86400 --evaluation-periods 1 \
   --threshold "${DAILY_COST_THRESHOLD:-50}" --comparison-operator GreaterThanThreshold \
-  --treat-missing-data notBreaching "${alarm_actions[@]}"
+  --treat-missing-data notBreaching ${alarm_actions[@]+"${alarm_actions[@]}"}
 
 # A single runaway call — a session that never closed, a barge-in loop.
 # Catching this per-call matters more than the daily total: the daily alarm
@@ -49,7 +52,7 @@ aws cloudwatch put-metric-alarm --region "$REGION" \
   --dimensions Name=service,Value="$SERVICE" \
   --statistic Average --period 3600 --evaluation-periods 1 \
   --threshold "${COST_PER_CALL_THRESHOLD:-2}" --comparison-operator GreaterThanThreshold \
-  --treat-missing-data notBreaching "${alarm_actions[@]}"
+  --treat-missing-data notBreaching ${alarm_actions[@]+"${alarm_actions[@]}"}
 
 # Calls that ended in an exception rather than a hangup. caller_disconnected
 # is deliberately a separate outcome so it doesn't count here.
@@ -60,7 +63,7 @@ aws cloudwatch put-metric-alarm --region "$REGION" \
   --dimensions Name=service,Value="$SERVICE" Name=outcome,Value=error \
   --statistic Sum --period 300 --evaluation-periods 1 \
   --threshold "${ERROR_THRESHOLD:-3}" --comparison-operator GreaterThanThreshold \
-  --treat-missing-data notBreaching "${alarm_actions[@]}"
+  --treat-missing-data notBreaching ${alarm_actions[@]+"${alarm_actions[@]}"}
 
 # Silence is the failure mode this whole change exists to prevent: if the
 # ledger stops arriving, every widget above goes quiet and looks calm.
@@ -71,7 +74,7 @@ aws cloudwatch put-metric-alarm --region "$REGION" \
   --dimensions Name=service,Value="$SERVICE" \
   --statistic Sum --period 21600 --evaluation-periods 1 \
   --threshold 1 --comparison-operator LessThanThreshold \
-  --treat-missing-data breaching "${alarm_actions[@]}"
+  --treat-missing-data breaching ${alarm_actions[@]+"${alarm_actions[@]}"}
 
 echo "==> done"
 aws cloudwatch describe-alarms --region "$REGION" --alarm-name-prefix Ava- \

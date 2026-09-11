@@ -203,22 +203,40 @@ def prices() -> dict[str, float]:
 TOKEN_BUCKETS = ("speech_in", "text_in", "speech_out", "text_out")
 
 
+# How many usage events get logged verbatim per process. Enough to see
+# whether the numbers grow (cumulative) or jitter (deltas) without turning the
+# log group into a payload store.
+RAW_USAGE_SAMPLES = 3
+
+
 class CallUsage:
     """Token counts for one call, accumulated as Nova Sonic reports them.
 
-    Nova's ``usageEvent`` carries running totals for the session, not deltas —
-    so this **replaces** rather than adds. Summing them would multiply the
-    bill by the number of usage events in the call, which on a two-minute call
-    is a large factor in the wrong direction.
+    **The reporting mode is detected, not assumed**, and that is the whole
+    design of this class. Strands gets this wrong for Nova: its event loop
+    does ``self._accumulated_input_tokens += event.input_tokens`` (bidi
+    ``agent/loop.py``) on an event whose fields are named ``totalInputTokens``
+    and whose payload offers both a ``details.delta`` and a ``details.total``
+    — i.e. a running total, summed as though it were a delta. That is why
+    ``gen_ai.usage.*`` on the ``bidi_session`` span reads roughly two orders of
+    magnitude above what the account is actually billed for, and why those
+    span attributes must not be used for cost. (The ``+=`` is presumably
+    correct for Gemini/OpenAI Realtime, which is how it survives.)
 
-    `raw_seen` exists because the exact key names inside `usageEvent.details`
-    are the one thing here not verified against live traffic: Strands throws
-    that sub-object away (`nova_sonic._convert_nova_event` keeps only
-    `totalInputTokens`/`totalOutputTokens`), and DEBUG logging has never been
-    on in this container, so no sample of it exists anywhere in CloudWatch.
-    The first event of each process is therefore logged verbatim; read one out
-    of the log group after the next deploy and tighten `update()` against what
-    it actually says.
+    Guessing the other way would be just as bad, so neither is hardcoded:
+
+    * Totals that never decrease across a call are cumulative → keep the last.
+    * A value that drops has to be a per-interval delta (a running total
+      cannot go backwards) → sum from then on, including what came before.
+
+    The conclusion is recorded as `mode` and reported on every ledger line, so
+    a wrong inference is visible in the data rather than silently priced.
+
+    The exact key names inside ``usageEvent.details`` are the remaining
+    unknown: Strands discards that sub-object, and DEBUG has never run in this
+    container, so no sample of it exists anywhere in CloudWatch. The first few
+    events of each process are logged verbatim as ``nova.usage.raw`` — read one
+    after deploying and tighten the parsing below against it.
     """
 
     def __init__(self) -> None:
@@ -226,23 +244,56 @@ class CallUsage:
         self.total_input = 0
         self.total_output = 0
         self.events = 0
-        self.raw_seen = False
+        # "cumulative" until a decrease proves otherwise.
+        self.mode = "cumulative"
+        self._last: dict[str, int] = {}
+        # Running sum of every figure ever reported for a key, maintained
+        # unconditionally. It is the answer under the delta reading, and it
+        # has to be kept from the first event because the switch can happen
+        # at any point — reconstructing it afterwards from `_last` alone
+        # would lose every value before the most recent one.
+        self._sum: dict[str, int] = {}
+
+    def _apply(self, key: str, value: int) -> int:
+        """Fold one reported figure in, under whichever mode is in force."""
+        previous = self._last.get(key)
+        if previous is not None and value < previous and self.mode == "cumulative":
+            # A running total cannot go backwards, so every figure so far was
+            # a per-interval delta that happened to be increasing. Switch the
+            # reading for the whole call, not just from here on.
+            self.mode = "delta"
+            event(
+                "nova.usage.mode_switch",
+                level=logging.WARNING,
+                field=key,
+                previous=previous,
+                received=value,
+                note="values decreased, so these are deltas, not running totals",
+            )
+        self._last[key] = value
+        self._sum[key] = self._sum.get(key, 0) + value
+        return self._sum[key] if self.mode == "delta" else value
 
     def update(self, usage: dict[str, Any]) -> None:
         self.events += 1
-        if not self.raw_seen:
-            self.raw_seen = True
-            # Truncated: this is a diagnostic, not a payload store, and an
-            # unbounded field is how a log group turns into a bill.
-            event("nova.usage.raw", payload=json.dumps(usage, default=str)[:2000])
+        if self.events <= RAW_USAGE_SAMPLES:
+            # Truncated: a diagnostic, not a payload store — an unbounded
+            # field is how a log group turns into a bill.
+            event(
+                "nova.usage.raw",
+                sample=self.events,
+                payload=json.dumps(usage, default=str)[:2000],
+            )
 
-        self.total_input = int(usage.get("totalInputTokens", self.total_input) or 0)
-        self.total_output = int(usage.get("totalOutputTokens", self.total_output) or 0)
+        if usage.get("totalInputTokens") is not None:
+            self.total_input = self._apply("in", int(usage["totalInputTokens"] or 0))
+        if usage.get("totalOutputTokens") is not None:
+            self.total_output = self._apply("out", int(usage["totalOutputTokens"] or 0))
 
-        # Nova reports per-modality counts under details.total.{input,output}.
-        # Read defensively: an unexpected shape must degrade to "no modality
-        # split" (the totals are still right) rather than raise inside the
-        # model's receive loop and drop the call.
+        # Per-modality counts live under details.total.{input,output}. Read
+        # defensively: an unexpected shape must degrade to "no modality split"
+        # (the totals are still usable) rather than raise inside the model's
+        # receive loop and drop a live call.
         try:
             total = (usage.get("details") or {}).get("total") or {}
             for side, suffix in (("input", "in"), ("output", "out")):
@@ -252,9 +303,12 @@ class CallUsage:
                 for key, value in counts.items():
                     lowered = key.lower()
                     if "speech" in lowered or "audio" in lowered:
-                        self.tokens[f"speech_{suffix}"] = int(value or 0)
+                        bucket = f"speech_{suffix}"
                     elif "text" in lowered:
-                        self.tokens[f"text_{suffix}"] = int(value or 0)
+                        bucket = f"text_{suffix}"
+                    else:
+                        continue
+                    self.tokens[bucket] = self._apply(bucket, int(value or 0))
         except Exception as exc:
             event("nova.usage.parse_failed", level=logging.WARNING, error=str(exc))
 
@@ -372,6 +426,10 @@ def emit_call_ledger(
         "human_handoff": human_handoff,
         "usage_events": usage.events,
         "modality_split_available": usage.split_available,
+        # Which way the provider's figures were read. Reported on every line
+        # because a wrong inference here scales the whole cost, and this is
+        # the field that makes that visible instead of silent.
+        "usage_mode": usage.mode,
         "cost_priced": cost is not None,
         **_trace_ids(),
         **extra,

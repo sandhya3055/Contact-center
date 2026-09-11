@@ -35,9 +35,21 @@ There is no AWS API that reports what one call cost, so it's computed:
   event. Lands as `CallCostUsd` in `Ava/Calls`.
 - **Compute** — AgentCore's own `USAGE_LOGS`, already per-session. Query in
   the dashboard's bottom-left widget.
-- **Truth** — Cost Explorer, monthly, reconciled against the sum of the
-  above. Drift over ~10% means the price table or the modality mapping is
-  wrong, not that the bill is.
+- **Truth** — Cost Explorer, monthly. **Filter to `RECORD_TYPE = Usage`** or
+  the answer is always zero: this account's spend is fully offset by credits,
+  so net cost grouped by service reads `-0.00` while gross usage is real.
+
+Two things worth knowing before reading any of these numbers:
+
+- **Compute outweighs model tokens ~6.5:1 here.** Gross usage for
+  2026-09-01→11 was $21.83 Amazon Bedrock AgentCore against $3.35 Amazon
+  Bedrock. `CallCostUsd` is the smaller half of the bill.
+- **The `gen_ai.usage.*` attributes on `bidi_session` spans are inflated by
+  roughly 100x and must not be used for cost.** Strands' bidi event loop sums
+  Nova's running totals as if they were deltas
+  (`strands/experimental/bidi/agent/loop.py`). `CallUsage` in
+  `observability.py` detects which reading applies rather than assuming, and
+  reports its conclusion as `usage_mode` on every ledger line.
 
 Set `NOVA_SONIC_PRICES_JSON` on the runtime or there is no cost figure at all
 — by design. See `.env.example`.
@@ -48,21 +60,19 @@ Set `NOVA_SONIC_PRICES_JSON` on the runtime or there is no cost figure at all
 ALARM_TOPIC_ARN=arn:aws:sns:us-west-2:...:ops ./observability/apply.sh
 ```
 
-Both `cloudwatch:PutDashboard` and `cloudwatch:PutMetricAlarm` are currently
-**denied** for the repo's usual IAM user, which is why this is a script rather
-than part of the deploy. The same user also lacks `ce:GetCostAndUsage`, so the
-monthly reconciliation above can't be run by them either. Three permissions to
-grant whoever owns this account:
+Applied 2026-09-11: the `Ava-Observability` dashboard and four alarms
+(`Ava-DailyModelCost-High`, `Ava-CostPerCall-High`, `Ava-CallErrors`,
+`Ava-NoLedgerData`) exist in us-west-2. They read `INSUFFICIENT_DATA` until a
+build carrying `observability.py` is actually deployed.
 
-```
-cloudwatch:PutDashboard
-cloudwatch:PutMetricAlarm
-ce:GetCostAndUsage
-```
+`Ava-NoLedgerData` uses `--treat-missing-data breaching` on purpose — silence
+is the failure this whole change exists to catch — so it will go to ALARM
+before the first deploy. That is correct behaviour, not a bug, and it is
+harmless while `ALARM_TOPIC_ARN` is unset and no action is attached.
 
-Alarm thresholds in `apply.sh` are placeholders. Set them from a week of real
-ledger data — a guessed threshold either never fires or always does, and both
-teach people to ignore it.
+Alarm thresholds are placeholders. Set them from a week of real ledger data —
+a guessed threshold either never fires or always does, and both teach people
+to ignore it.
 
 ## Useful queries
 
