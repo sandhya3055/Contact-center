@@ -123,9 +123,20 @@ def main() -> int:
     for day in sorted(set(ledger) | set(billed)):
         d = ledger.get(day, {})
         lc, bc = d.get("cost", 0.0), billed.get(day, 0.0)
+        calls = d.get("calls", 0)
         total_l += lc
         total_b += bc
-        drift = f"{(lc - bc) / bc * 100:+7.1f}%" if bc else "      n/a"
+        # A day with billed usage but no ledger line at all is not drift —
+        # it is a day the agent wasn't emitting one (before the deploy, or
+        # traffic from local runs and evals, which never produce one). Saying
+        # "-100%, your price table is wrong" there sends you hunting a bug
+        # that isn't real.
+        if not calls:
+            drift = "  no ledger" if bc else "         —"
+        elif bc:
+            drift = f"{(lc - bc) / bc * 100:+7.1f}%"
+        else:
+            drift = "   unbilled"
         flags = []
         if d.get("unpriced"):
             flags.append(f"{d['unpriced']} unpriced")
@@ -136,19 +147,30 @@ def main() -> int:
         print(f"{day:12} {d.get('calls', 0):6} {lc:10.4f} {bc:10.4f} {drift}   "
               f"{', '.join(flags)}")
 
-    print(f"\n{'TOTAL':12} {sum(v['calls'] for v in ledger.values()):6} "
-          f"{total_l:10.4f} {total_b:10.4f}", end="")
-    if total_b:
-        pct = (total_l - total_b) / total_b * 100
-        print(f" {pct:+7.1f}%")
+    # Only days that have both sides can say anything about accuracy.
+    comparable = [d for d in sorted(set(ledger) | set(billed))
+                  if ledger.get(d, {}).get("calls") and billed.get(d)]
+    cmp_l = sum(ledger[d]["cost"] for d in comparable)
+    cmp_b = sum(billed[d] for d in comparable)
+    total_calls = sum(v["calls"] for v in ledger.values())
+
+    print(f"\n{'TOTAL':12} {total_calls:6} {total_l:10.4f} {total_b:10.4f}")
+
+    if not comparable:
+        print("\nNothing comparable in this window: no day has both a call ledger and\n"
+              "billed Nova Sonic usage. Days marked 'no ledger' had traffic the agent\n"
+              "did not account for — before the deploy, or local/eval runs, which emit\n"
+              "no ledger line. Re-run over a window with real calls in it.")
+    else:
+        pct = (cmp_l - cmp_b) / cmp_b * 100
+        print(f"\nOver the {len(comparable)} comparable day(s): "
+              f"ledger ${cmp_l:.4f} vs billed ${cmp_b:.4f}  ({pct:+.1f}%)")
         print("\n" + (
             "Within 10% — the price table and token parsing agree with the bill."
             if abs(pct) <= 10 else
             "Off by more than 10%. In order of likelihood: the price table is wrong,\n"
             "`usage_mode` was inferred wrongly, or the modality mapping is off.\n"
             "Check the flags column, then a `nova.usage.raw` sample."))
-    else:
-        print("\n\nNo billed Nova Sonic usage in this window — nothing to compare against.")
 
     comp = sum(compute.values())
     print(f"\nFor context, AgentCore Runtime compute over the same window: ${comp:.4f}"
