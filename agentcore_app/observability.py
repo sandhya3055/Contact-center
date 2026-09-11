@@ -131,11 +131,28 @@ def setup_logging() -> None:
         os.getenv("STRANDS_LOG_LEVEL", "INFO").upper()
     )
     # uvicorn installs its own handlers at import; clearing them makes its
-    # access and error lines come out in the same JSON shape as ours instead
-    # of two formats interleaved in one log group.
+    # lines come out in the same JSON shape as ours instead of two formats
+    # interleaved in one log group.
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging.getLogger(name).handlers[:] = []
         logging.getLogger(name).propagate = True
+
+    # ...but not the access log, which on this service is almost entirely
+    # AgentCore's `/ping`. Measured after the first deploy: uvicorn.access was
+    # 10,791 lines/hour — 85% of all lines and 93% of all bytes in the runtime
+    # log group, about 54 MB/day, none of it about a phone call.
+    #
+    # Routing it through the JSON formatter is what made it expensive: every
+    # health check picked up a ~200-byte envelope of call_id/trace_id fields
+    # that are all "-" for a request with no call behind it. So this is a
+    # regression introduced by setup_logging itself, not a pre-existing one.
+    #
+    # WARNING rather than removing the logger: a genuine uvicorn access-layer
+    # problem still surfaces. Set UVICORN_ACCESS_LOG_LEVEL=INFO to get the
+    # request-by-request view back while debugging a routing issue.
+    logging.getLogger("uvicorn.access").setLevel(
+        os.getenv("UVICORN_ACCESS_LOG_LEVEL", "WARNING").upper()
+    )
 
 
 log = logging.getLogger("ava")
