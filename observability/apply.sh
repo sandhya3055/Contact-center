@@ -94,6 +94,20 @@ aws logs put-metric-filter --region "$REGION" \
     metricName=CallsDisconnected,metricNamespace=Ava/Calls,metricValue=1,defaultValue=0
 echo "    Ava/Calls CallsDisconnected"
 
+# The one the alarm actually watches. call.teardown is logged unconditionally
+# as the first statement of the teardown block, on every path a call can end
+# by -- caller hangup, human handoff, and Ava's own end_call -- so it is the
+# only count that pairs 1:1 with a ledger line. CallsDisconnected above counts
+# hangups alone, which would have missed the two calls Ava ended herself on
+# 2026-09-11 and lost the ledger for.
+aws logs put-metric-filter --region "$REGION" \
+  --log-group-name "$LOG_GROUP" \
+  --filter-name Ava-CallsEnded \
+  --filter-pattern '{ $.event = "call.teardown" }' \
+  --metric-transformations \
+    metricName=CallsEnded,metricNamespace=Ava/Calls,metricValue=1,defaultValue=0
+echo "    Ava/Calls CallsEnded"
+
 # Every caller hangup owes a ledger line. When that stops being true, the call
 # still happened, still cost money, and shows up in nothing — which is exactly
 # what happened on 2026-09-11, twice, before v21: teardown froze the event loop
@@ -105,11 +119,11 @@ echo "    Ava/Calls CallsDisconnected"
 echo "==> lost-ledger alarm"
 aws cloudwatch put-metric-alarm --region "$REGION" \
   --alarm-name Ava-LedgerLost \
-  --alarm-description "A call disconnected but wrote no ledger line: the call happened, cost money, and appears in no metric" \
+  --alarm-description "A call reached teardown but wrote no ledger line: it happened, cost money, and appears in no metric" \
   --metrics "[
-    {\"Id\":\"disc\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"Ava/Calls\",\"MetricName\":\"CallsDisconnected\"},\"Period\":3600,\"Stat\":\"Sum\"},\"ReturnData\":false},
+    {\"Id\":\"ended\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"Ava/Calls\",\"MetricName\":\"CallsEnded\"},\"Period\":3600,\"Stat\":\"Sum\"},\"ReturnData\":false},
     {\"Id\":\"ledg\",\"MetricStat\":{\"Metric\":{\"Namespace\":\"Ava/Calls\",\"MetricName\":\"Calls\",\"Dimensions\":[{\"Name\":\"service\",\"Value\":\"$SERVICE\"}]},\"Period\":3600,\"Stat\":\"Sum\"},\"ReturnData\":false},
-    {\"Id\":\"lost\",\"Expression\":\"FILL(disc,0) - FILL(ledg,0)\",\"Label\":\"calls that ended with no ledger line\",\"ReturnData\":true}
+    {\"Id\":\"lost\",\"Expression\":\"FILL(ended,0) - FILL(ledg,0)\",\"Label\":\"calls that ended with no ledger line\",\"ReturnData\":true}
   ]" \
   --comparison-operator GreaterThanThreshold --threshold 0 \
   --evaluation-periods 1 --datapoints-to-alarm 1 \

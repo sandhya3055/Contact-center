@@ -93,7 +93,13 @@ ALARM_TOPIC_ARN=arn:aws:sns:us-west-2:...:ops ./observability/apply.sh
 Applied 2026-09-11: the `Ava-Observability` dashboard and five alarms
 (`Ava-DailyModelCost-High`, `Ava-CostPerCall-High`, `Ava-CallErrors`,
 `Ava-NoLedgerData`, `Ava-LedgerLost`) exist in us-west-2, along with the
-`Ava-CallsDisconnected` metric filter.
+`Ava-CallsDisconnected` and `Ava-CallsEnded` metric filters.
+
+The dashboard is in two sections, and the split is the point: everything
+above **Account spend** moves within a minute of a call ending, and the four
+widgets below it never do — they are Cost Explorer's daily figures, settled
+about three days late. Reading a stale cost widget as "my call didn't
+register" is the mistake that separation exists to prevent.
 
 `Ava-NoLedgerData` uses `--treat-missing-data breaching` on purpose — silence
 is the failure this whole change exists to catch — so it will go to ALARM
@@ -106,11 +112,18 @@ ledger lines alone, so "nobody rang" and "three people rang and all three
 vanished" look identical to it. On 2026-09-11 two calls in a row ran fine,
 cost money, and wrote no ledger; every widget stayed calm and no alarm moved.
 
-So `Ava-CallsDisconnected` counts hangups straight out of the log stream — a
+So two metric filters count endings straight out of the log stream — a
 metric filter, because the EMF block only exists *on* a ledger line, which
-makes a missing ledger invisible to every metric in `Ava/Calls` by definition
-— and the alarm watches `FILL(disc,0) - FILL(ledg,0)`. Every hangup owes a
-ledger line; the gap between them is the number of calls that disappeared.
+makes a missing ledger invisible to every metric in `Ava/Calls` by definition.
+`Ava-CallsEnded` counts `call.teardown`, which is logged unconditionally on
+every path a call can end by, and is what the alarm watches:
+`FILL(ended,0) - FILL(ledg,0)`. Every ending owes a ledger line, and the gap
+between them is the number of calls that disappeared.
+
+`Ava-CallsDisconnected` counts caller hangups alone. It came first and is
+kept as the "who ended it" cut, but it is the wrong thing to alarm on: it
+would have missed both calls Ava ended herself on 2026-09-11, which are
+exactly the ones that lost their ledger.
 
 A metric filter is not retroactive: it only sees events written after it was
 created, so the series starts empty and the alarm sits in `INSUFFICIENT_DATA`
