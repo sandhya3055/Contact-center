@@ -57,6 +57,8 @@ class ClaimSlots:
             raise ValueError("incident_date cannot be blank")
         if not self.incident_location or not self.incident_location.strip():
             raise ValueError("incident_location cannot be blank")
+        if not self.description or not self.description.strip():
+            raise ValueError("Description cannot be blank")
 
 
 def check_duplicate_claim(config: AppConfig, vehicle_reg: str) -> bool:

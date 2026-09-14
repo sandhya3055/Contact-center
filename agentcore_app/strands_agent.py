@@ -91,6 +91,7 @@ from observability import (
 
 setup_logging()
 
+import cases
 import handoff
 from handoff import LiveCall
 from mcp_proxy_for_aws.client import aws_iam_streamablehttp_client
@@ -707,20 +708,30 @@ def _extract_json(tool_result: ToolResult) -> dict[str, Any] | None:
     return None
 
 
-def _escalation_id_from(payload: Any, _depth: int = 0) -> str | None:
-    """The escalation id anywhere in a tool result, or None if it isn't one.
+def _scalar_by_key(payload: Any, needle: str, _depth: int = 0) -> str | None:
+    """The first identifier-shaped value anywhere in a tool result whose field
+    name mentions ``needle``, or None if there isn't one.
 
-    Detected by field name shape (any key mentioning "escalation" whose value
-    is a scalar), not by tool name — same reasoning as every other wrapper
-    here: the gateway's tool set is discovered live, so nothing hardcodes
-    which tool escalates. Today that's escalate's `escalation_id`.
+    Detected by field name shape, not by tool name — same reasoning as every
+    other wrapper here: the gateway's tool set is discovered live, so nothing
+    hardcodes which tool returns what. Today that finds ``escalation_id`` on
+    escalate, ``policy_id`` on a policy lookup, and ``claim_ref`` on a claim.
 
     The search is recursive, and re-parses JSON-encoded strings on the way
     down, because how deeply the gateway nests a Lambda's return value is not
-    something this side controls: `{"escalation_id": …}` and an MCP-style
-    `{"content": [{"text": "{\\"escalation_id\\": …}"}]}` envelope both have to
-    count, or an escalation silently fails to notify anyone — the one failure
-    mode where the caller is left waiting for a human who was never told.
+    something this side controls: ``{"escalation_id": …}`` and an MCP-style
+    ``{"content": [{"text": "{\\"escalation_id\\": …}"}]}`` envelope both have
+    to count, or an escalation silently fails to notify anyone — the one
+    failure mode where the caller is left waiting for a human who was never
+    told.
+
+    Within a single dict, keys that *name* an identifier win over keys that
+    merely mention the thing. Without that, a claim view whose fields happen
+    to serialize as ``claim_type`` before ``claim_ref`` yields "CASHLESS" as
+    the claim id, and a payload pairing ``escalation_status`` with
+    ``escalation_id`` yields "queued" as the escalation id. Which of those a
+    dict hands over first is an ordering accident, and an id is not something
+    to decide by accident.
     """
     # Generous, because each envelope level costs two hops (container, then
     # item) and a re-parsed JSON string costs another: a payload nested two
@@ -728,26 +739,106 @@ def _escalation_id_from(payload: Any, _depth: int = 0) -> str | None:
     if _depth > 16:
         return None
     if isinstance(payload, dict):
-        for key, value in payload.items():
-            if "escalation" in key.lower() and isinstance(value, (str, int, float)) and str(value).strip():
-                return str(value)
+        named = [key for key in payload if needle in key.lower()]
+        # Identifier-named keys first, then anything else mentioning the
+        # needle — see the note above on why the order is not left to chance.
+        for keys in (
+            [k for k in named if _ID_KEY.search(k)],
+            [k for k in named if not _ID_KEY.search(k)],
+        ):
+            for key in keys:
+                value = payload[key]
+                if isinstance(value, (str, int, float)) and str(value).strip():
+                    return str(value)
+                # `verify_dob` answers with `policy_ids: ["POL-1"]` — the id is
+                # named correctly and simply arrives in a list.
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        if isinstance(item, (str, int, float)) and str(item).strip():
+                            return str(item)
         for value in payload.values():
-            found = _escalation_id_from(value, _depth + 1)
+            found = _scalar_by_key(value, needle, _depth + 1)
             if found:
                 return found
         return None
     if isinstance(payload, (list, tuple)):
         for item in payload:
-            found = _escalation_id_from(item, _depth + 1)
+            found = _scalar_by_key(item, needle, _depth + 1)
             if found:
                 return found
         return None
-    if isinstance(payload, str) and "escalation" in payload.lower():
+    if isinstance(payload, str) and needle in payload.lower():
         try:
-            return _escalation_id_from(json.loads(payload), _depth + 1)
+            return _scalar_by_key(json.loads(payload), needle, _depth + 1)
         except (json.JSONDecodeError, TypeError):
             return None
     return None
+
+
+# A field name that names an identifier rather than merely mentioning one:
+# `policy_id`, `claimRef`, `escalation_ids`, `policyNumber`. Matched on the
+# key's tail so `identity_check` and `reference_note` don't qualify.
+_ID_KEY = re.compile(r"(id|ids|ref|refs|reference|no|number)$", re.IGNORECASE)
+
+
+def _escalation_id_from(payload: Any) -> str | None:
+    """The escalation id anywhere in a tool result, or None if it isn't one."""
+    return _scalar_by_key(payload, "escalation")
+
+
+# What a finished call's case row records as the policy, claim and escalation
+# it concerned — keyed by the case field, valued by the name shape that finds
+# it. Nothing here names a tool: whichever tool happens to return a
+# policy-shaped id is the one that supplies it.
+_CASE_ID_FIELDS = {"policyId": "policy", "claimId": "claim", "escalationId": "escalation"}
+
+
+class _CaseFactsTool(AgentTool):
+    """Wraps an AgentTool so the identifiers a successful call actually
+    *returned* are remembered for this call's case record (see cases.py).
+
+    Records rather than gates — the only wrapper here that changes nothing
+    about whether or how a tool runs. It exists because a case has to say
+    which policy and which claim the call was about, and by teardown the only
+    honest source for that is what a completed lookup returned. The model's
+    arguments are not that source: `_GroundingGateTool` exists precisely
+    because an argument can be a number the caller recited or the model
+    invented.
+
+    Last write wins, which is what a call actually means by "the claim this
+    was about": a lookup surfacing an existing open claim sets it, and
+    registering a new one later replaces it with the one that was just
+    created.
+    """
+
+    def __init__(self, wrapped: AgentTool, facts: dict[str, str]) -> None:
+        super().__init__()
+        self._wrapped = wrapped
+        self._facts = facts
+
+    @property
+    def tool_name(self) -> str:
+        return self._wrapped.tool_name
+
+    @property
+    def tool_type(self) -> str:
+        return self._wrapped.tool_type
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return self._wrapped.tool_spec
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        async for event in self._wrapped.stream(tool_use, invocation_state, **kwargs):
+            # Inside the loop, not after it: Strands' tool executor returns as
+            # soon as it sees a ToolResultEvent and abandons this generator, so
+            # post-loop code never runs (see _LoggingTool.stream).
+            if isinstance(event, ToolResultEvent) and event.tool_result.get("status") == "success":
+                for field, needle in _CASE_ID_FIELDS.items():
+                    found = _scalar_by_key(event.tool_result, needle)
+                    if found:
+                        self._facts[field] = found
+            yield event
 
 
 class _EscalationNotifierTool(AgentTool):
@@ -1546,6 +1637,7 @@ async def build_gateway_tools(
     on_mobile_number_confirmed: Callable[[str], Awaitable[None]],
     known_mobile_number: list[str | None],
     live_call: LiveCall,
+    case_facts: dict[str, str],
 ) -> list[AgentTool]:
     """Load every tool the gateway currently exposes, unmodified.
 
@@ -1563,9 +1655,11 @@ async def build_gateway_tools(
     argument — a date of birth, an account number — the model invented
     rather than one the caller actually provided), and
     _MobileNumberSyncTool (pushes a newly-confirmed mobile/phone number back
-    to the browser), and _EscalationNotifierTool (a successful escalation
-    opens the human handoff — Slack message, joinable agent portal) — all
-    scoped to this call's
+    to the browser), _EscalationNotifierTool (a successful escalation
+    opens the human handoff — Slack message, joinable agent portal), and
+    _CaseFactsTool (remembers the policy/claim/escalation ids a completed
+    tool call actually returned, for the case record written at teardown)
+    — all scoped to this call's
     grounded_values/cache/recent_digits/known_mobile_number, so state never
     leaks across connections.
 
@@ -1592,6 +1686,7 @@ async def build_gateway_tools(
         tool = _TranscriptConsistencyGateTool(tool, recent_digits, grounded_values, tried_numbers, call_session_id)
         tool = _MobileNumberSyncTool(tool, on_mobile_number_confirmed, known_mobile_number)
         tool = _EscalationNotifierTool(tool, live_call)
+        tool = _CaseFactsTool(tool, case_facts)
         wrapped.append(_LoggingTool(tool))
 
     return wrapped
@@ -1980,6 +2075,13 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
     # write at teardown can read the final confirmed number.
     known_mobile_number: list[str | None] = [None]
 
+    # The policy, claim and escalation this call turned out to be about, as
+    # completed tool calls actually reported them (see _CaseFactsTool). Out
+    # here rather than inside build_gateway_tools because the case written at
+    # teardown is the only thing that reads it, and that runs long after the
+    # tools have stopped.
+    case_facts: dict[str, str] = {}
+
     # Set when the first frame reveals this isn't a caller at all. Read by the
     # teardown below, which must then leave the socket (and the call this
     # connection is joining) alone — see voice_chat.
@@ -2021,7 +2123,8 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
 
         tools_task = asyncio.create_task(
             build_gateway_tools(
-                mcp_client, recent_digits, notify_mobile_number, known_mobile_number, live_call
+                mcp_client, recent_digits, notify_mobile_number, known_mobile_number,
+                live_call, case_facts,
             )
         )
         prompt_task = asyncio.create_task(get_system_prompt())
@@ -2653,10 +2756,20 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             # it would be a phantom call diluting every per-call average.
             try:
                 escalated = live_call.escalation is not None
+                # Four outcomes, matching the dashboard's two by-outcome
+                # widgets and the case row's resolutionStatus exactly — one
+                # vocabulary for "how did this call end", not three.
+                #
+                # `escalated` is deliberately NOT one of them: it described a
+                # call that queued for a human nobody joined, which is a fact
+                # about the *queue*, not about how the connection ended, and it
+                # overlapped `human_handoff` confusingly. It stays a boolean
+                # field on this same line, so "caller asked for a human and
+                # never got one" is still one Logs Insights filter away
+                # (`escalated = 1 and outcome != "human_handoff"`) — it just
+                # no longer splits the outcome dimension.
                 if ava_disconnected:
                     outcome = "human_handoff"
-                elif call_outcome == "completed" and escalated:
-                    outcome = "escalated"
                 else:
                     outcome = call_outcome
                 counters = COUNTERS.get()
@@ -2684,6 +2797,31 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
                                              KeyboardInterrupt, SystemExit)):
                     raise
 
+            # The case record: what the caller wanted and whether they got it,
+            # as opposed to what the call cost. Written here, second only to
+            # the ledger and before anything is closed, for the same reason
+            # the ledger moved here — everything it records is already
+            # settled, and a container killed mid-teardown must still leave
+            # the business a row.
+            #
+            # This is the deterministic half. The judged fields
+            # (customerIntent, resolutionSummary, resolutionStatus) need a
+            # model to read the transcript, which takes seconds, so they are
+            # filled in at the very end of this block instead — see cases.py
+            # for why the write is split in two.
+            #
+            # cases.write_case never raises; it is awaited only so the row is
+            # on the table before the update below looks for it.
+            derived_status = await cases.write_case(
+                call=live_call,
+                call_outcome=call_outcome,
+                duration_seconds=time.monotonic() - call_started,
+                human_handoff=ava_disconnected,
+                mobile_number=known_mobile_number[0] or live_call.mobile_number,
+                ids=case_facts,
+                error=call_error,
+            )
+
             # Tell any open portal the caller has gone, and keep the call readable
             # there for a while (handoff.RETENTION_SECONDS) so a human following a
             # Slack link a few minutes late still sees the conversation.
@@ -2702,6 +2840,18 @@ async def _serve_caller(websocket: WebSocket) -> dict[str, Any] | None:
             await _bounded_teardown(
                 asyncio.to_thread(mcp_client.stop, None, None, None),
                 failed_event="gateway.close_failed", timeout=5)
+
+            # Last, deliberately. Reading the transcript back costs a Bedrock
+            # round trip, and by now the caller has hung up, the socket is
+            # shut and the model session is stopped — so those seconds are
+            # spent where they inconvenience nobody, and every step above has
+            # already happened even if this one is killed partway.
+            #
+            # Skipped when the row isn't there: the update is conditional on
+            # the case existing (cases._update_case), so without this it would
+            # spend the model call only to have the write refused.
+            if derived_status is not None:
+                await cases.summarize_and_update(live_call, derived_status)
 
 
 if __name__ == "__main__":

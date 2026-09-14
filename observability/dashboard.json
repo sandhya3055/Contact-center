@@ -7,7 +7,7 @@
       "width": 24,
       "height": 1,
       "properties": {
-        "markdown": "## Per call\nEvery widget below moves within about a minute of a call ending. If a call happened and these did not change, the ledger line was lost — see **Ledger integrity**."
+        "markdown": "## Per call\nEvery widget below moves within about a minute of a call ending. If a call happened and these did not change, the ledger line was lost \u2014 see **Ledger integrity**."
       }
     },
     {
@@ -176,7 +176,7 @@
             "service",
             "ava-voice-agent",
             "outcome",
-            "escalated",
+            "human_handoff",
             {
               "id": "m2",
               "visible": false
@@ -185,27 +185,8 @@
           [
             {
               "expression": "FILL(m2,0)",
-              "label": "escalated",
-              "id": "e2"
-            }
-          ],
-          [
-            "Ava/Calls",
-            "CallCostUsd",
-            "service",
-            "ava-voice-agent",
-            "outcome",
-            "human_handoff",
-            {
-              "id": "m3",
-              "visible": false
-            }
-          ],
-          [
-            {
-              "expression": "FILL(m3,0)",
               "label": "human_handoff",
-              "id": "e3"
+              "id": "e2"
             }
           ],
           [
@@ -216,15 +197,15 @@
             "outcome",
             "error",
             {
-              "id": "m4",
+              "id": "m3",
               "visible": false
             }
           ],
           [
             {
-              "expression": "FILL(m4,0)",
+              "expression": "FILL(m3,0)",
               "label": "error",
-              "id": "e4"
+              "id": "e3"
             }
           ]
         ],
@@ -294,7 +275,7 @@
             "service",
             "ava-voice-agent",
             "outcome",
-            "escalated",
+            "human_handoff",
             {
               "id": "m2",
               "visible": false
@@ -303,27 +284,8 @@
           [
             {
               "expression": "FILL(m2,0)",
-              "label": "escalated",
-              "id": "e2"
-            }
-          ],
-          [
-            "Ava/Calls",
-            "Calls",
-            "service",
-            "ava-voice-agent",
-            "outcome",
-            "human_handoff",
-            {
-              "id": "m3",
-              "visible": false
-            }
-          ],
-          [
-            {
-              "expression": "FILL(m3,0)",
               "label": "human_handoff",
-              "id": "e3"
+              "id": "e2"
             }
           ],
           [
@@ -334,15 +296,15 @@
             "outcome",
             "error",
             {
-              "id": "m4",
+              "id": "m3",
               "visible": false
             }
           ],
           [
             {
-              "expression": "FILL(m4,0)",
+              "expression": "FILL(m3,0)",
               "label": "error",
-              "id": "e4"
+              "id": "e3"
             }
           ]
         ]
@@ -524,7 +486,7 @@
       "height": 6,
       "properties": {
         "region": "us-west-2",
-        "title": "Ledger integrity — every ending owes a ledger line (lost should stay flat at 0)",
+        "title": "Ledger integrity \u2014 every ending owes a ledger line (lost should stay flat at 0)",
         "view": "timeSeries",
         "stacked": false,
         "stat": "Sum",
@@ -584,7 +546,7 @@
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "Runtime compute per session — seconds_alive vs call duration is where the money goes",
+        "title": "Runtime compute per session \u2014 seconds_alive vs call duration is where the money goes",
         "region": "us-west-2",
         "view": "table",
         "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields `attributes.session.id` as session_id,\n         `metrics.agent.runtime.vcpu.hours.used` as vcpu_h,\n         `metrics.agent.runtime.memory.gb_hours.used` as gb_h\n| stats count(*) as seconds_alive,\n        sum(vcpu_h) as vcpu_hours,\n        sum(gb_h) as gb_hours,\n        sum(vcpu_h)*0.0895 + sum(gb_h)*0.00945 as compute_usd\n    by session_id\n| sort compute_usd desc\n| limit 25"
@@ -597,7 +559,7 @@
       "width": 24,
       "height": 7,
       "properties": {
-        "title": "Call ledger — one row per finished call",
+        "title": "Call ledger \u2014 one row per finished call",
         "region": "us-west-2",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| fields @timestamp, call_id, outcome, CallDurationSeconds as secs, CallCostUsd as usd, ToolCalls as tools, GateBlocks as gates, InputTokens as tok_in, OutputTokens as tok_out, transcript_turns as turns, usage_mode, cost_priced\n| filter event = \"call.ledger\"\n| sort @timestamp desc\n| limit 50"
@@ -610,7 +572,7 @@
       "width": 24,
       "height": 6,
       "properties": {
-        "title": "Errors and refusals (agent + tool Lambda) — three benign per-call warnings filtered out",
+        "title": "Errors and refusals (agent + tool Lambda) \u2014 three benign per-call warnings filtered out",
         "region": "us-west-2",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT' | SOURCE '/aws/lambda/insurarncae-voice-agent-mcp-tool'\n| fields @timestamp, service, call_id, session_id, event, msg, error\n| filter level in [\"ERROR\", \"WARNING\"]\n| filter level = \"ERROR\"\n    or not ispresent(logger)\n    or (logger not in [\"bedrock_agentcore.memory.integrations.strands.session_manager\",\n                       \"opentelemetry.instrumentation.instrumentor\"]\n        and msg not like \"Invalid HTTP request\")\n| sort @timestamp desc\n| limit 50"
@@ -623,7 +585,7 @@
       "width": 24,
       "height": 1,
       "properties": {
-        "markdown": "## Account spend\n**These four do not move when a call ends.** They are Cost Explorer's daily figures, published by the `ava-cost-publisher` Lambda, and AWS settles them about three days late — so a call made today shows up here on Sunday, not now."
+        "markdown": "## Account spend\n**These four do not move when a call ends.** They are Cost Explorer's daily figures, published by the `ava-cost-publisher` Lambda, and AWS settles them about three days late \u2014 so a call made today shows up here on Sunday, not now."
       }
     },
     {
@@ -633,7 +595,7 @@
       "width": 16,
       "height": 8,
       "properties": {
-        "title": "AWS cost by category (daily — plotted when learned, ~3 days after the spend)",
+        "title": "AWS cost by category (daily \u2014 plotted when learned, ~3 days after the spend)",
         "region": "us-west-2",
         "view": "timeSeries",
         "stacked": true,

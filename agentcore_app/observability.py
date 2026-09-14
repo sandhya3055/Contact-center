@@ -426,8 +426,12 @@ def emit_call_ledger(
     *extraction* happens on the other line.
 
     `outcome` is a metric dimension because it is the cut that actually gets
-    asked for: "escalated calls cost 3x and there are more this week" should
-    be a dashboard line, not a query.
+    asked for: "handed-off calls cost 3x and there are more this week" should
+    be a dashboard line, not a query. It carries exactly four values --
+    completed, caller_disconnected, human_handoff, error -- which are also the
+    `cases` table's resolutionStatus, so the two never disagree. `escalated`
+    stays a plain field rather than an outcome: it says whether a human was
+    queued for, which is a different question from how the call ended.
 
     CallCostUsd is published **only when it could be computed**. An unpriced
     call still records every token count and `cost_priced: false`; what it
