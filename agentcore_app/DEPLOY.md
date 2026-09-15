@@ -327,9 +327,26 @@ Three things it adds, and why each one was missing:
    `Ava/Calls` gets `CallCostUsd`, `CallDurationSeconds`, `InputTokens`,
    `OutputTokens`, `ToolCalls`, `GateBlocks` and the four per-modality
    counts with no `PutMetricData` call — no API throttling on a busy
-   container. `outcome` (`completed` / `caller_disconnected` / `escalated` /
-   `human_handoff` / `error`) is a metric dimension, so "escalated calls cost
-   3× and there are more this week" is a dashboard line rather than a query.
+   container. `outcome` — exactly four values, `completed` /
+   `caller_disconnected` / `human_handoff` / `error` — is a metric dimension,
+   so "handed-off calls cost 3× and there are more this week" is a dashboard
+   line rather than a query. The same four, spelled the same way, are the
+   `cases` table's `resolutionStatus`, so a count on the dashboard and a count
+   on that table agree by construction.
+
+   **`escalated` is deliberately not one of them.** Whether a human was
+   *queued for* is a fact about the queue, not about how the connection ended,
+   and as an outcome it overlapped `human_handoff` confusingly. It remains a
+   boolean field on the `call.ledger` line, so the call that matters most —
+   the caller who asked for a person and never got one — is one filter away:
+
+   ```
+   fields @timestamp, call_id, outcome, escalated
+   | filter event = "call.ledger" and escalated = 1 and outcome != "human_handoff"
+   ```
+
+   On the `cases` table the equivalent is `escalationId` set with
+   `resolutionStatus` anything but `human_handoff`.
 
 **Set `NOVA_SONIC_PRICES_JSON` or there is no cost.** USD per 1M tokens,
 per modality:
@@ -417,6 +434,126 @@ before you tune anything: over 2026-09-01→11 this agent's gross usage was
 6.5:1, so the ledger's `CallCostUsd` only ever explains a minority of the bill.
 More than ~10% drift on the Bedrock half means the price table, the modality
 mapping, or `usage_mode` is wrong.
+
+### The case record: one row per finished call
+
+The ledger above answers "what did this call cost and how did it end". The
+`cases` table answers the other question — **what did the caller want, and did
+they get it** — as fields the contact centre can sort, assign and report on
+instead of a transcript somebody has to read.
+
+`cases.py` writes it from the one `finally` in `strands_agent.serve` that every
+ending goes through: the caller closing the tab, Ava calling `end_call`, a human
+agent taking the call over, or the connection failing. There is no separate
+"agent disconnected" hook to add — they all land there.
+
+**The write is two halves, deliberately.** The first is every fact already
+settled when the line drops (who called, which policy and claim, how it ended);
+it is one `PutItem` and runs immediately after the ledger line, for the same
+reason the ledger moved there — a container killed mid-teardown must still
+leave a row. The second asks Bedrock to read the transcript and fill in
+`customerIntent`, `resolutionSummary` and `resolutionStatus`, then `UpdateItem`s
+them on; it runs **last**, after the socket and the model session are closed,
+because it is the only part that takes seconds and by then nobody is waiting.
+Neither half can raise: a record *about* a call must not become the reason a
+call's teardown fails.
+
+| Field | Where it comes from |
+|---|---|
+| `caseId` | The call id — one call is one case, so a retried write upserts rather than duplicating. It is also the id in the portal link and every log line for that call. |
+| `customerId` | The caller's confirmed mobile number. There is no customer entity upstream — policies carry a `mobileNo` and a `holderName`, and nothing joins a person across them — so this is the only identifier stable between calls that survives a lookup finding nothing. |
+| `policyId`, `claimId`, `escalationId` | What a **completed tool call actually returned** (`_CaseFactsTool` in `strands_agent.py`), never what the caller said or the model passed in — same provenance rule `_GroundingGateTool` enforces during the call. Last write wins, so registering a claim replaces an existing one that was merely looked up. |
+| `resolutionStatus` | The same four values as the ledger's `outcome` dimension and the dashboard. Derived from the connection, with **one** exception: `caller_disconnected` becomes `completed` when the model reports `callerNeedMet` — a caller who gets their answer and hangs up satisfied closes the socket identically to one who gives up, and only the transcript tells them apart. `error` and `human_handoff` are never model-writable. The upgrade only ever goes up, and `callOutcome` keeps the raw connection fact beside it. |
+| `customerIntent`, `customerIntentDetail`, `resolutionSummary` | The Bedrock pass — only what a transcript can actually answer. `customerIntent` is a closed set (`cases.CUSTOMER_INTENTS`); anything outside it becomes `unknown` rather than landing something unreportable. |
+| `callOutcome`, `humanHandoff` | What the derived status was computed *from*, under names the model never writes. With `escalationId` (present exactly when the call escalated) these three reconstruct it via `cases._derived_status`, so the machinery's version is always recoverable without storing it twice. |
+| `summaryStatus` | `pending` → `ok`, or `skipped` (no transcript / summarization off) or `failed` with `summaryNote`. A quiet call and a broken pipeline are not the same thing, and an empty summary alone can't tell you which you have. |
+| `memoryActorId` | The caller's AgentCore Memory actor. **Note:** `list_events` needs an actor *and* a session id, and the session id is no longer stored, so this identifies the caller but will not by itself fetch this call's transcript. |
+| `startedAt`, `createdAt` | Sydney-local strings (`14/09/2026 17:27:56 AEST`), as everywhere else in this project. |
+| `createdAtEpoch` | The same instant as a raw epoch Number, and the GSI range key. An index has to sort and the AU string cannot: `DD/MM/YYYY` is not lexicographically chronological, and Sydney's clock repeats an hour at the AEDT→AEST change. Same split the escalations table makes between `created_at` and `queueKey`. **The range key must never be `createdAt` itself** — DynamoDB then rejects the whole item with `Type mismatch for Index Key createdAt Expected: N Actual: S`. |
+
+The caller's date of birth is deliberately **not** stored: it is the secret used
+to authenticate them, and a case is read by far more people than an escalations
+queue row is.
+
+Timestamps depend on a tz database, which a Debian slim image may not carry and
+which `requirements.lock.txt` does not pin. The lookup is therefore lazy and
+allowed to fail: a missing database logs `case.timezone_unavailable` once and
+falls back to UTC **labelled UTC**, rather than raising at import and killing
+the container for the sake of a display string. If that event appears, add
+`tzdata` to `requirements.txt` and regenerate the lock.
+
+**Create the table** (once, out of band — same as `policies`, `claims` and
+`escalations`). The two GSIs are what let "this customer's cases" and "this
+policy's cases" be queried rather than scanned, per decision D15:
+
+```bash
+aws dynamodb create-table --region us-west-2 \
+  --table-name cases \
+  --attribute-definitions \
+      AttributeName=caseId,AttributeType=S \
+      AttributeName=customerId,AttributeType=S \
+      AttributeName=policyId,AttributeType=S \
+      AttributeName=createdAtEpoch,AttributeType=N \
+  --key-schema AttributeName=caseId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --global-secondary-indexes \
+   '[{"IndexName":"customerId-index",
+      "KeySchema":[{"AttributeName":"customerId","KeyType":"HASH"},
+                   {"AttributeName":"createdAtEpoch","KeyType":"RANGE"}],
+      "Projection":{"ProjectionType":"ALL"}},
+     {"IndexName":"policyId-index",
+      "KeySchema":[{"AttributeName":"policyId","KeyType":"HASH"},
+                   {"AttributeName":"createdAtEpoch","KeyType":"RANGE"}],
+      "Projection":{"ProjectionType":"ALL"}}]'
+```
+
+`createdAtEpoch` is epoch seconds as a **Number** because it is the range key on
+both indexes and therefore has to sort; `createdAt` is the Sydney-local string a
+human reads. They are the same instant, and must stay separate: `epoch_to_au`'s
+format is not lexicographically ordered (`DD/MM/YYYY`), Sydney's clock goes
+backwards at the AEDT→AEST change, and DynamoDB rejects every write whose index
+key attribute has the wrong type.
+
+Only set a TTL if you actually want cases to expire (`CASE_TTL_DAYS`, default
+`0` = never — a case is a business record, unlike the escalations row it
+outlives). If you do:
+
+```bash
+aws dynamodb update-time-to-live --region us-west-2 --table-name cases \
+  --time-to-live-specification Enabled=true,AttributeName=ttl
+```
+
+**The agent's role** needs one more statement. `bedrock:InvokeModel` is already
+granted on `*` by the `NovaSonic` statement, so the summarizer needs nothing
+added for the model call itself:
+
+```json
+{"Sid":"CaseRecord","Effect":"Allow",
+ "Action":["dynamodb:PutItem","dynamodb:UpdateItem"],
+ "Resource":"arn:aws:dynamodb:<region>:<account>:table/cases"}
+```
+
+Without it every call logs one `case.write_failed` and nothing else changes —
+the call, the ledger and the portal are all unaffected.
+
+**Checking it works.** After a call, in the runtime log group:
+
+```
+fields @timestamp, event, case_id, policy_id, resolution_status, customer_intent
+| filter event like /^case\./
+| sort @timestamp desc
+```
+
+`case.written` then `case.summarized` is the healthy pair. `case.written`
+alone with no follow-up means the Bedrock half failed — check
+`case.summary_failed`'s `error`, which is usually `CASE_SUMMARY_MODEL_ID`
+naming a model that is not invocable in `CASE_SUMMARY_REGION`. Note that
+`us.amazon.nova-lite-v1:0` is an **inference profile** id, not a bare model id:
+Nova is only invocable through a cross-region profile in most regions, and the
+bare `amazon.nova-lite-v1:0` fails there with a `ValidationException` that reads
+as though the model doesn't exist. Any model id the Converse API accepts works
+here — Converse normalizes the request shape, so switching to Claude on Bedrock
+is an env var and no code change.
 
 ### Bedrock model invocation logging is per-region
 

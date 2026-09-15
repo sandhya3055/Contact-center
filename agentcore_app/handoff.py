@@ -575,43 +575,50 @@ def unregister_call(call: LiveCall) -> None:
 
 # ---------------------------------------------------------------- Slack
 
-def _transcript_tail(call: LiveCall, lines: int = 8) -> str:
-    tail = call.transcript[-lines:]
-    if not tail:
-        return "_Nothing transcribed yet._"
-    rendered = "\n".join(
-        f"{'Caller' if line['role'] == 'user' else 'Ava'}: {line['text']}" for line in tail
-    )
-    # Slack rejects a block over 3000 chars; the tail is context, not the
-    # record — the portal has the whole thing.
-    if len(rendered) > 2600:
-        rendered = "…" + rendered[-2600:]
-    return f"```{rendered}```"
+def _clip(value: str, limit: int) -> str:
+    """One line, no longer than `limit`, for a value going into a Slack block.
+
+    Both values on the card below reach it from the model by way of the
+    escalate tool, so neither has a length or a shape this side controls. A
+    block Slack rejects means no notification at all for a caller who is on
+    hold right now, and a newline in a two-column field breaks the layout —
+    so whitespace is collapsed before the length is bounded.
+    """
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
 
 
 def _slack_blocks(call: LiveCall, portal_url: str) -> list[dict[str, Any]]:
-    details = (call.escalation or {}).get("details", {}) or {}
-    reason = str(details.get("reason") or "not given")
-    note = str(details.get("note") or "").strip()
-    fields = [
-        {"type": "mrkdwn", "text": f"*Reason*\n{reason}"},
-        {"type": "mrkdwn", "text": f"*Caller*\n{call.caller_name or 'name not provided'}"},
-        {"type": "mrkdwn", "text": f"*Number*\n{call.mobile_number or 'not provided'}"},
-    ]
-    for key, value in details.items():
-        if key in {"reason", "note"} or value in (None, ""):
-            continue
-        fields.append({"type": "mrkdwn", "text": f"*{key.replace('_', ' ').title()}*\n{value}"})
+    """The escalation card: who is waiting, why, and the way in.
 
-    blocks: list[dict[str, Any]] = [
-        {"type": "header", "text": {"type": "plain_text", "text": "☎️ Caller needs a human", "emoji": True}},
-        # Slack renders at most 10 fields per section.
-        {"type": "section", "fields": fields[:10]},
-    ]
-    if note:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*Ava's summary*\n{note}"}})
-    blocks += [
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Last few lines*\n{_transcript_tail(call)}"}},
+    Deliberately only those three. Everything else this call knows — the
+    number, the rest of the escalation details, Ava's summary, the last lines
+    of transcript — is one click away in the portal, and reprinting it here
+    made the card slower to read at the one moment it matters: while someone
+    is still on the line waiting for whoever reads it.
+    """
+    details = (call.escalation or {}).get("details", {}) or {}
+    caller = _clip(call.caller_name or "", 100) or "Name not provided"
+    # Reasons arrive from the escalate tool as slugs (`caller_requested`), but
+    # the field is free text, so this has to read well either way: underscores
+    # become spaces and only the first letter is forced, which leaves a real
+    # sentence alone rather than Title Casing It Like This.
+    reason = _clip(str(details.get("reason") or "").replace("_", " "), 300)
+    reason = (reason[:1].upper() + reason[1:]) if reason else "Not given"
+
+    return [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "☎️  Caller needs a human", "emoji": True},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Caller*\n{caller}"},
+                {"type": "mrkdwn", "text": f"*Reason*\n{reason}"},
+            ],
+        },
+        {"type": "divider"},
         {
             "type": "actions",
             "elements": [{
@@ -625,13 +632,12 @@ def _slack_blocks(call: LiveCall, portal_url: str) -> list[dict[str, Any]]:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": f"The caller is still on the line · call `{call.call_id}` · "
-                        "opening the portal lets you listen before you join, and "
-                        "joining disconnects Ava",
+                "text": "The caller is still on the line · opening the portal lets you "
+                        "listen before you join, and joining disconnects Ava · "
+                        f"`{call.call_id}`",
             }],
         },
     ]
-    return blocks
 
 
 def _post_to_slack(payload: dict[str, Any]) -> None:
@@ -675,8 +681,10 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
     details = (call.escalation or {}).get("details", {}) or {}
     payload = {
         "channel": SLACK_ESCALATION_CHANNEL,
-        # Fallback text for notifications and clients that can't render blocks.
-        "text": f"Caller needs a human — {details.get('reason') or 'escalation'} — {portal_url}",
+        # Fallback text — the push notification, and any client that can't
+        # render blocks. The same three things the card shows, on one line.
+        "text": (f"{call.caller_name or 'A caller'} needs a human — "
+                 f"{details.get('reason') or 'escalation'} — {portal_url}"),
         "blocks": _slack_blocks(call, portal_url),
         "unfurl_links": False,
     }

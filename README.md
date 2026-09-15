@@ -367,6 +367,47 @@ ESCALATIONS_TABLE=escalations                     # the queue table the portal r
 # MEMORY_ID / MEMORY_REGION are the same ones the agent already uses.
 ```
 
+### What a finished call leaves behind
+
+Every ending — the caller closing the tab, Ava calling `end_call`, a human
+agent taking the call over, or the connection failing — goes through one
+`finally` in `strands_agent.serve`, and writes two records there:
+
+- **A ledger line** (`observability.py`): what the call *cost* and how it
+  ended. Two log events, one of them CloudWatch EMF. Nothing to provision.
+- **A case row** (`cases.py` → the `cases` DynamoDB table): what the caller
+  *wanted* and whether they got it — `customerId`, `policyId`, `claimId`,
+  `customerIntent`, `resolutionSummary`, `resolutionStatus` — so the contact
+  centre can sort and report on calls instead of reading transcripts.
+
+The case is written in two halves. The facts land first, as a single
+`PutItem` right after the ledger, because a container killed mid-teardown must
+still leave a row. Then, once the socket and the model session are closed and
+nobody is waiting any more, Bedrock reads the transcript and fills in the three
+judged fields. The identifiers come from what a **completed tool call actually
+returned**, never from what the caller said or the model passed in — the same
+provenance rule the grounding gate enforces during the call.
+
+`resolutionStatus` is derived from how the connection ended, with one exception
+the transcript is allowed to make: a caller who got their answer and hung up
+satisfied closes the socket identically to one who gave up, so the model's
+`callerNeedMet` upgrades `caller_disconnected` to `completed`. It only ever goes
+up, `error` and `human_handoff` are never model-writable, and `callOutcome`
+keeps the raw connection fact beside it. Timestamps are Sydney-local strings, as
+everywhere else here.
+
+```bash
+CASES_TABLE=cases                                 # one row per finished call
+CASE_SUMMARY_MODEL_ID=us.amazon.nova-lite-v1:0    # empty = facts only, no summary
+# CASES_REGION / CASE_SUMMARY_REGION default to AWS_REGION.
+```
+
+The table is created out of band like every other table here; the `create-table`
+call, the two GSIs, the one IAM statement and the log query to check it are in
+[agentcore_app/DEPLOY.md](agentcore_app/DEPLOY.md) under "The case record".
+Without the IAM statement each call logs one `case.write_failed` and nothing
+else changes.
+
 **Where the link is.** An escalation puts it in two places: the Slack message,
 and one line on the agent's stdout —
 

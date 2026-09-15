@@ -30,10 +30,16 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.lock.txt
 
 # portal.html is read at request time by handoff.py, so it has to ship too.
-# observability.py is imported at the top of strands_agent.py — omit it and
-# the container fails at import with ModuleNotFoundError, before /ping ever
-# answers, so the deploy fails loudly rather than running without logging.
-COPY strands_agent.py handoff.py portal_context.py observability.py portal.html ./
+# observability.py and cases.py are imported at the top of strands_agent.py —
+# omit either and the container fails at import with ModuleNotFoundError,
+# before /ping ever answers, so the deploy fails loudly rather than running
+# without logging or without a case record.
+#
+# This list is explicit rather than `COPY . .`: it is what keeps the image to
+# the files the service actually runs, and it is why a new module has to be
+# named here as well as imported. Development-only files (smoke_case.py) are
+# left out for the same reason.
+COPY strands_agent.py handoff.py portal_context.py observability.py cases.py portal.html ./
 
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app

@@ -70,7 +70,9 @@ real tool call) before trusting this in production -- see PROJECT_STATE.md D103.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -100,6 +102,65 @@ from app.tools.policy_tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# --- Structured logging -----------------------------------------------------
+# This Lambda's log group (/aws/lambda/insurarncae-voice-agent-mcp-tool) is a
+# different group from the agent's, and always will be — they're different
+# services. What makes that acceptable rather than a blind spot is that both
+# sides emit the same JSON shape with the same `session_id`, so one Logs
+# Insights query across both groups reconstructs a call end to end: what Ava
+# asked for, what the gate allowed, and what this Lambda actually did.
+#
+# `session_id` is the per-call uuid strands_agent.py injects into any tool
+# whose schema requires one (_FixedArgumentTool), and it arrives here as an
+# ordinary field of `event`. Nothing new has to be plumbed for this to work.
+#
+# Deliberately a module-level dict rather than a ContextVar: a Lambda
+# execution environment handles exactly one invocation at a time, so there is
+# no concurrency for a ContextVar to protect against, and this survives into
+# the logging of an exception raised out of the handler.
+_LOG_CONTEXT: dict[str, Any] = {}
+
+
+class _JsonFormatter(logging.Formatter):
+    """Same field names the agent's observability.py emits, minus the parts
+    that only make sense in a long-lived process."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(record.created)),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "service": "ava-mcp-tools",
+            **_LOG_CONTEXT,
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            payload["error"] = self.formatException(record.exc_info)
+        return json.dumps({k: v for k, v in payload.items() if v is not None}, default=str)
+
+
+def _configure_logging() -> None:
+    """Reformat whatever handler the Lambda runtime already installed.
+
+    The runtime adds its own handler to the root logger before this module is
+    imported, and adding a second one would double every line. Replacing the
+    formatter on the existing handlers keeps exactly one line per log call.
+    """
+    root = logging.getLogger()
+    root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    for handler in root.handlers or ():
+        handler.setFormatter(_JsonFormatter())
+    if not root.handlers:  # local test runs, no runtime handler to reuse
+        handler = logging.StreamHandler()
+        handler.setFormatter(_JsonFormatter())
+        root.addHandler(handler)
+
+
+_configure_logging()
+
 
 _NUMBER_RE = re.compile(r"^\+[0-9]{7,15}$")
 _DOB_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -320,7 +381,7 @@ def _escalate(config: AppConfig, event: dict) -> dict:
         policy_id=event.get("policy_id"),
         holder_name=event.get("holder_name"),
         transcript_tail=[event["note"]] if event.get("note") else [],
-        channel="mcp",
+        channel="voice",
         ttl=now + config.escalation_ttl_seconds,
     )
     EscalationRepository(config).save(record)
@@ -356,14 +417,42 @@ def lambda_handler(event: dict, context: Any) -> dict:
         ToolError: Unknown tool name, or a required input field is missing/invalid.
     """
     tool = _tool_name(event, context)
+
+    # Set before the first log line of the invocation and rebuilt (not
+    # updated) each time, so a reused execution environment can't leak the
+    # previous call's session id onto this one's logs.
+    _LOG_CONTEXT.clear()
+    _LOG_CONTEXT.update(
+        {
+            "tool": tool,
+            # The agent's per-call id, arriving as an ordinary tool argument.
+            # Absent for a Console test call or a tool whose schema doesn't
+            # declare it, which is why it's read defensively.
+            "session_id": event.get("session_id") if isinstance(event, dict) else None,
+            "aws_request_id": getattr(context, "aws_request_id", None),
+        }
+    )
+
+    started = time.monotonic()
     handler = _DISPATCH.get(tool)
     if handler is None:
-        logger.warning("mcp_tools: unknown tool requested: %s", tool)
+        logger.warning("unknown tool requested", extra={"fields": {"event_name": "tool.unknown"}})
         raise ToolError(f"unknown tool: {tool}")
     try:
         result = handler(load_config(), event)
     except (KeyError, ValueError) as exc:
-        logger.warning("mcp_tools: %s rejected invalid input: %s", tool, exc)
+        logger.warning(
+            "rejected invalid input",
+            extra={"fields": {"event_name": "tool.invalid_input", "reason": str(exc)}},
+        )
         raise ToolError(f"{tool}: invalid input: {exc}") from exc
-    logger.info("mcp_tools: %s ok", tool)
+    logger.info(
+        "tool ok",
+        extra={
+            "fields": {
+                "event_name": "tool.ok",
+                "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+        },
+    )
     return result
