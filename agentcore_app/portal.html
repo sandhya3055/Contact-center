@@ -1074,10 +1074,27 @@ async function connect() {
     // agent origin: there is nothing to connect to, and falling back to
     // same-origin would fetch this static host and get its 404 — reported as
     // if the agent were down, which it may well not be.
+    // Three different faults used to share one message that named the
+    // environment variables, which sent anyone whose link was simply missing
+    // its esc= off to check an Amplify console that was configured correctly
+    // all along. The page can tell these apart, so it says which one it is.
     if (!haveRecords) {
-      showDead('This portal has nothing to read',
-        'Neither PORTAL_CONTEXT_URL nor PORTAL_API_BASE gave this page any data. Check the '
-        + 'Amplify environment variables, then redeploy.');
+      if (!CONTEXT_URL) {
+        showDead('This portal has nothing to read',
+          'No records endpoint (PORTAL_CONTEXT_URL) and no agent origin (PORTAL_API_BASE) '
+          + 'are configured, so this page has no source for the escalation or the call. '
+          + 'Check the Amplify environment variables, then redeploy.');
+      } else if (!ESC_ID) {
+        showDead('This link has no escalation id',
+          'A handoff’s records are looked up by the esc= parameter, and this URL doesn’t '
+          + 'carry one. Open the escalation link exactly as Slack posted it, rather than '
+          + 'editing or retyping it.');
+      } else {
+        showDead('Couldn’t read this escalation',
+          'The records endpoint returned nothing for this handoff. It may have expired '
+          + 'from the queue, or the endpoint may be failing — the browser console has the '
+          + 'underlying error.');
+      }
       return;
     }
     consoleEl.hidden = false;
