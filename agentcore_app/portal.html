@@ -373,7 +373,6 @@
     <section class="card" id="recordCard">
       <div class="card-head">
         <h2>Escalation record</h2>
-        <span class="src-tag" id="recordTag">DynamoDB</span>
       </div>
       <div class="card-body">
         <dl class="facts" id="recordFacts"></dl>
@@ -441,7 +440,7 @@ const leaveBtn = el('leaveBtn');
 const onAir = el('onAir'), audioNudge = el('audioNudge');
 const transcriptEl = el('transcript'), transcriptFoot = el('transcriptFoot'), watchers = el('watchers');
 const sourceTag = el('sourceTag'), refreshBtn = el('refreshBtn');
-const recordFacts = el('recordFacts'), recordTag = el('recordTag'), recordNote = el('recordNote');
+const recordFacts = el('recordFacts'), recordNote = el('recordNote');
 const agentName = el('agentName');
 const callerBars = [...el('callerBars').querySelectorAll('span')];
 const selfBars = [...el('selfBars').querySelectorAll('span')];
@@ -737,13 +736,7 @@ function renderRecord(context) {
   recordNote.hidden = !notes;
   recordNote.textContent = notes;
 
-  if (!record) {
-    recordTag.textContent = 'DynamoDB · no row';
-    recordTag.dataset.stale = 'true';
-    return;
-  }
-  recordTag.textContent = 'DynamoDB';
-  recordTag.dataset.stale = 'false';
+  if (!record) return;
 
   // Rendered from whatever the row actually holds, so a schema change on the
   // table side shows up here without a change on this side.

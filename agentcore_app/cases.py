@@ -30,20 +30,25 @@ Neither half ever raises: a case is a record *about* a call, and it must not
 become the reason a call's teardown fails. Both report what went wrong as one
 structured event and return.
 
-The split runs along what each half can actually know. `resolutionStatus` is
-derived, never written by the model: it says how the *connection* ended, and a
-transcript cannot show whether a socket closed or a human joined. The model
-owns only what a transcript does answer — `customerIntent`,
-`customerIntentDetail` and `resolutionSummary`.
+The split runs along what each half can actually know. The model is asked only
+what the words show — what the caller wanted, what was done, and whether they
+left with anything outstanding. It is never asked to name a `resolutionStatus`,
+because three of those four are facts about the connection. It does decide one
+thing: a caller who gets their answer and hangs up satisfied closes the socket
+identically to one who gives up, so `callerNeedMet` turns `caller_disconnected`
+into `completed`. That is the only transition, and it only ever goes up.
 
 `resolutionStatus` uses the same four values, spelled the same way, as the call
-ledger's `outcome` dimension and the dashboard's two by-outcome widgets, so a
-count there and a count here agree by construction rather than by coincidence.
+ledger's `outcome` dimension and the dashboard's two by-outcome widgets. The
+vocabulary is shared; the per-call answer can differ, because the ledger asks
+how the connection ended and this asks how the caller's need ended. `callOutcome`
+keeps the raw connection fact on the row either way.
 
-Timestamps are Sydney-local strings, matching the rest of this project.
-`createdAt` is the exception and stays a raw epoch Number: it is the range key
-on both GSIs, and an AU-formatted string neither sorts chronologically nor runs
-monotonically across the AEDT->AEST change. `createdAtAu` is the readable twin.
+Timestamps are Sydney-local strings, matching the rest of this project —
+`startedAt` and `createdAt` both read as `14/09/2026 17:27:56 AEST`.
+`createdAtEpoch` carries the same instant as a raw epoch and is the range key on
+both GSIs, because an index has to sort and an AU string neither sorts
+chronologically nor runs monotonically across the AEDT->AEST change.
 """
 
 from __future__ import annotations
@@ -165,22 +170,35 @@ def epoch_to_au(epoch_seconds: float) -> str:
 # gives you a thousand one-row groups and no report; the model's own words are
 # kept alongside in `customerIntentDetail`, which is where the nuance goes.
 
-# Deliberately the *same four values*, spelled the same way, as the ledger's
-# `outcome` dimension and the dashboard's two by-outcome widgets. One
-# vocabulary for "how did this call end" across all three, so a count on the
-# dashboard and a count on this table answer with the same number.
+# The *same four values*, spelled the same way, as the ledger's `outcome`
+# dimension and the dashboard's two by-outcome widgets — one vocabulary for
+# "how did this call end" across all three.
 #
-# That is also why this field is no longer written by the model: these are
-# facts about the connection — whether the socket closed, whether a human
-# joined — and a transcript cannot show them. A model asked for one would be
-# guessing. What it wanted this field for ("did the caller actually get what
-# they came for") lives in resolutionSummary, which says so in words.
+# The values match; the per-call answer can differ, and that difference is the
+# point. The ledger asks how the *connection* ended, which it settles before
+# any model runs. The case asks how the *caller's need* ended, which sometimes
+# only the transcript knows: someone who got their answer and hung up satisfied
+# leaves a closed socket that looks identical to an abandoned call.
+#
+# So exactly one transition is delegated to the model, and only ever upward:
+# `caller_disconnected` -> `completed`, when the transcript shows the question
+# was answered with nothing outstanding (see _RESOLVED_UPGRADE_FROM). `error`
+# and `human_handoff` are never model-writable — whether a process raised or a
+# human pressed Join is not visible in anything that was said. `callOutcome`
+# keeps the raw connection fact either way, so an upgraded row still shows
+# `callOutcome: caller_disconnected` next to `resolutionStatus: completed` and
+# a reader can see both.
 RESOLUTION_STATUSES = (
-    "completed",             # the call reached its natural end
-    "caller_disconnected",   # the caller hung up mid-flow
+    "completed",             # the caller got what they came for
+    "caller_disconnected",   # the caller hung up with something still open
     "human_handoff",         # a human agent took the call over
     "error",                 # the call itself broke
 )
+
+# The only status the transcript is allowed to change, and the only one it can
+# be changed to. Anything else stays exactly as the machinery derived it.
+_RESOLVED_UPGRADE_FROM = "caller_disconnected"
+_RESOLVED_UPGRADE_TO = "completed"
 
 CUSTOMER_INTENTS = (
     "policy_enquiry",
@@ -365,13 +383,16 @@ def build_case(
         "transcriptTurns": len(call.transcript),
 
         # Sydney-local, like every other timestamp this project stores.
-        "startedAtAu": epoch_to_au(call.started_at),
-        "createdAtAu": epoch_to_au(now),
-        # The sortable twin of createdAtAu, and the reason both exist: this is
-        # the range key on both GSIs, so it has to order chronologically as
-        # stored. The AU string does not (see epoch_to_au). Same split the
-        # escalations table makes between `created_at` and `queueKey`.
-        "createdAt": round(now, 3),
+        "startedAt": epoch_to_au(call.started_at),
+        "createdAt": epoch_to_au(now),
+        # The sortable twin of createdAt, and the reason both exist: an index
+        # has to order chronologically as stored, and the AU string does not
+        # (see epoch_to_au — DD/MM/YYYY isn't lexicographic, and Sydney's clock
+        # repeats an hour at the AEDT->AEST change). So this carries the raw
+        # epoch and is the range key on both GSIs, leaving `createdAt` free to
+        # be the one a human reads. Exactly the split the escalations table
+        # makes between its `created_at` and `queueKey`.
+        "createdAtEpoch": round(now, 3),
 
         # How to read the conversation itself back out of AgentCore Memory.
         # The case holds a summary, not the transcript — this is the pointer
@@ -483,10 +504,15 @@ def _summarize(transcript_text: str, derived_status: str) -> dict[str, Any]:
     """Ask Bedrock what this call was about (blocking; use a thread).
 
     Returns only what a transcript can actually answer: what the caller wanted,
-    and what was done about it. `resolutionStatus` is **not** among them — it
-    is how the connection ended, which is derived (see RESOLUTION_STATUSES) and
-    is passed in here purely as context so the summary doesn't describe a call
-    as wrapped up when the caller in fact hung up mid-sentence.
+    what was done about it, and whether they left with anything outstanding.
+
+    That last one is `callerNeedMet`, and it is a *question*, not a status —
+    the model is never asked to name a `resolutionStatus`, because three of the
+    four are facts about the connection it cannot see. The caller's own words
+    are the one thing it can judge, and the caller hanging up the moment their
+    question is answered is indistinguishable from abandonment at the socket.
+    :func:`summarize_and_update` is what turns a True here into the single
+    permitted upgrade.
 
     `customerIntent` is validated against its closed set; anything the model
     invents becomes "unknown" rather than landing an unreportable value.
@@ -495,9 +521,8 @@ def _summarize(transcript_text: str, derived_status: str) -> dict[str, Any]:
     prompt = (
         "Here is the transcript of a finished call.\n\n"
         f"<transcript>\n{transcript_text}\n</transcript>\n\n"
-        f"The call ended as: {derived_status}. That is already recorded and is "
-        "not yours to decide — treat it as fact, and don't describe the call as "
-        "wrapped up if it says the caller disconnected or the call failed.\n\n"
+        f"The connection ended as: {derived_status}. That is already recorded "
+        "and is not yours to decide.\n\n"
         "Reply with exactly this JSON object:\n"
         "{\n"
         f'  "customerIntent": one of [{_INTENT_LIST}],\n'
@@ -505,8 +530,18 @@ def _summarize(transcript_text: str, derived_status: str) -> dict[str, Any]:
         "actually wanted, in your own words,\n"
         '  "resolutionSummary": two or three sentences for a colleague picking '
         "this up cold — what the caller wanted, what was done, and what (if "
-        "anything) is still outstanding\n"
+        "anything) is still outstanding,\n"
+        '  "callerNeedMet": true or false\n'
         "}\n\n"
+        "callerNeedMet is true only if the caller's question was actually "
+        "answered and nothing was left open — including when they then hung up "
+        "without saying goodbye, which is a normal way to end a call someone is "
+        "satisfied with. Signs of true: they said that's all, they don't need "
+        "anything else, thanks, or the answer they asked for was given and they "
+        "raised nothing further. Signs of false: they were still waiting on "
+        "something, a question went unanswered, they were promised a person, "
+        "they were cut off mid-answer, or they sounded unhappy. If the "
+        "transcript doesn't settle it, answer false.\n\n"
         "Do not include the caller's date of birth, mobile number, address or "
         "any other identifier in the summary — the case record already holds "
         "the ones that matter."
@@ -527,10 +562,15 @@ def _summarize(transcript_text: str, derived_status: str) -> dict[str, Any]:
         raise ValueError(f"model returned no JSON object: {text[:200]!r}")
 
     intent = str(parsed.get("customerIntent") or "").strip()
+    # Only a real boolean true counts. A model that omits the field, or answers
+    # with prose, leaves the derived status alone — the upgrade has to be
+    # asserted, never inferred from something ambiguous.
+    need_met = parsed.get("callerNeedMet")
     return {
         "customerIntent": intent if intent in CUSTOMER_INTENTS else "unknown",
         "customerIntentDetail": str(parsed.get("customerIntentDetail") or "").strip()[:500],
         "resolutionSummary": str(parsed.get("resolutionSummary") or "").strip()[:2000],
+        "callerNeedMet": need_met is True or str(need_met).strip().lower() == "true",
         "summaryStatus": "ok",
     }
 
@@ -541,6 +581,12 @@ async def summarize_and_update(call: "LiveCall", derived_status: str) -> None:
     Runs last in teardown: it is the only part of the case that takes seconds,
     and by the time it runs the caller has hung up, the socket is closed and
     the model session is stopped, so the seconds cost nobody anything.
+
+    It is also where the one permitted status upgrade is applied:
+    `caller_disconnected` becomes `completed` when the model reports the
+    caller's need was met — someone who gets their answer and hangs up
+    satisfied closes the socket exactly like someone who gives up, and only the
+    transcript tells them apart. Nothing else about the status is negotiable.
 
     Every failure leaves the deterministic row exactly as it was, with
     `summaryStatus` saying which failure it was — "skipped" (nothing to read,
@@ -575,6 +621,15 @@ async def summarize_and_update(call: "LiveCall", derived_status: str) -> None:
         await _mark_summary(call.call_id, "failed", f"{type(exc).__name__}: {exc}")
         return
 
+    # The one transition the transcript is allowed to make. Applied here rather
+    # than inside _summarize so the rule lives next to the status it governs,
+    # and so the model's answer stays a plain question-and-answer that can be
+    # logged and argued with.
+    need_met = fields.pop("callerNeedMet", False)
+    upgraded = need_met and derived_status == _RESOLVED_UPGRADE_FROM
+    if upgraded:
+        fields["resolutionStatus"] = _RESOLVED_UPGRADE_TO
+
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_update_case, call.call_id, fields),
@@ -588,7 +643,14 @@ async def summarize_and_update(call: "LiveCall", derived_status: str) -> None:
         return
 
     event("case.summarized", case_id=call.call_id,
-          customer_intent=fields["customerIntent"])
+          customer_intent=fields["customerIntent"],
+          resolution_status=fields.get("resolutionStatus", derived_status),
+          # Both reported, so an upgrade is auditable after the fact: the row
+          # says `completed` and this line says what it was derived as and that
+          # the transcript is why it changed.
+          derived_status=derived_status,
+          caller_need_met=need_met,
+          upgraded=upgraded)
 
 
 async def _mark_summary(case_id: str, status: str, note: str) -> None:

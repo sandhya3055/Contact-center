@@ -463,12 +463,13 @@ call's teardown fails.
 | `caseId` | The call id — one call is one case, so a retried write upserts rather than duplicating. It is also the id in the portal link and every log line for that call. |
 | `customerId` | The caller's confirmed mobile number. There is no customer entity upstream — policies carry a `mobileNo` and a `holderName`, and nothing joins a person across them — so this is the only identifier stable between calls that survives a lookup finding nothing. |
 | `policyId`, `claimId`, `escalationId` | What a **completed tool call actually returned** (`_CaseFactsTool` in `strands_agent.py`), never what the caller said or the model passed in — same provenance rule `_GroundingGateTool` enforces during the call. Last write wins, so registering a claim replaces an existing one that was merely looked up. |
-| `resolutionStatus` | **Derived, never written by the model** — the same four values as the ledger's `outcome` dimension and the dashboard. It describes how the connection ended, which a transcript cannot show, so asking a model for it would be asking it to guess. |
+| `resolutionStatus` | The same four values as the ledger's `outcome` dimension and the dashboard. Derived from the connection, with **one** exception: `caller_disconnected` becomes `completed` when the model reports `callerNeedMet` — a caller who gets their answer and hangs up satisfied closes the socket identically to one who gives up, and only the transcript tells them apart. `error` and `human_handoff` are never model-writable. The upgrade only ever goes up, and `callOutcome` keeps the raw connection fact beside it. |
 | `customerIntent`, `customerIntentDetail`, `resolutionSummary` | The Bedrock pass — only what a transcript can actually answer. `customerIntent` is a closed set (`cases.CUSTOMER_INTENTS`); anything outside it becomes `unknown` rather than landing something unreportable. |
 | `callOutcome`, `humanHandoff` | What the derived status was computed *from*, under names the model never writes. With `escalationId` (present exactly when the call escalated) these three reconstruct it via `cases._derived_status`, so the machinery's version is always recoverable without storing it twice. |
 | `summaryStatus` | `pending` → `ok`, or `skipped` (no transcript / summarization off) or `failed` with `summaryNote`. A quiet call and a broken pipeline are not the same thing, and an empty summary alone can't tell you which you have. |
 | `memoryActorId` | The caller's AgentCore Memory actor. **Note:** `list_events` needs an actor *and* a session id, and the session id is no longer stored, so this identifies the caller but will not by itself fetch this call's transcript. |
-| `startedAtAu`, `createdAtAu` | Sydney-local strings (`14/09/2026 16:51:20 AEST`), as everywhere else in this project. `createdAt` stays alongside as a raw epoch Number because it is the GSI range key — `DD/MM/YYYY` does not sort chronologically, and Sydney's clock is not monotonic across the AEDT→AEST change. |
+| `startedAt`, `createdAt` | Sydney-local strings (`14/09/2026 17:27:56 AEST`), as everywhere else in this project. |
+| `createdAtEpoch` | The same instant as a raw epoch Number, and the GSI range key. An index has to sort and the AU string cannot: `DD/MM/YYYY` is not lexicographically chronological, and Sydney's clock repeats an hour at the AEDT→AEST change. Same split the escalations table makes between `created_at` and `queueKey`. **The range key must never be `createdAt` itself** — DynamoDB then rejects the whole item with `Type mismatch for Index Key createdAt Expected: N Actual: S`. |
 
 The caller's date of birth is deliberately **not** stored: it is the secret used
 to authenticate them, and a case is read by far more people than an escalations
@@ -492,25 +493,26 @@ aws dynamodb create-table --region us-west-2 \
       AttributeName=caseId,AttributeType=S \
       AttributeName=customerId,AttributeType=S \
       AttributeName=policyId,AttributeType=S \
-      AttributeName=createdAt,AttributeType=N \
+      AttributeName=createdAtEpoch,AttributeType=N \
   --key-schema AttributeName=caseId,KeyType=HASH \
   --billing-mode PAY_PER_REQUEST \
   --global-secondary-indexes \
    '[{"IndexName":"customerId-index",
       "KeySchema":[{"AttributeName":"customerId","KeyType":"HASH"},
-                   {"AttributeName":"createdAt","KeyType":"RANGE"}],
+                   {"AttributeName":"createdAtEpoch","KeyType":"RANGE"}],
       "Projection":{"ProjectionType":"ALL"}},
      {"IndexName":"policyId-index",
       "KeySchema":[{"AttributeName":"policyId","KeyType":"HASH"},
-                   {"AttributeName":"createdAt","KeyType":"RANGE"}],
+                   {"AttributeName":"createdAtEpoch","KeyType":"RANGE"}],
       "Projection":{"ProjectionType":"ALL"}}]'
 ```
 
-`createdAt` is epoch seconds as a **Number** because it is the range key on both
-indexes and therefore has to sort. The AU-formatted display strings used
-elsewhere in this project (`epoch_to_au`) deliberately don't — `DD/MM/YYYY` is
-not lexicographically ordered and Sydney's clock goes backwards at the
-AEDT→AEST change.
+`createdAtEpoch` is epoch seconds as a **Number** because it is the range key on
+both indexes and therefore has to sort; `createdAt` is the Sydney-local string a
+human reads. They are the same instant, and must stay separate: `epoch_to_au`'s
+format is not lexicographically ordered (`DD/MM/YYYY`), Sydney's clock goes
+backwards at the AEDT→AEST change, and DynamoDB rejects every write whose index
+key attribute has the wrong type.
 
 Only set a TTL if you actually want cases to expire (`CASE_TTL_DAYS`, default
 `0` = never — a case is a business record, unlike the escalations row it

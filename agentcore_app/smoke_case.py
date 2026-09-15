@@ -173,6 +173,12 @@ ANGRY_CHAT = [
     ("assistant", "I'm not able to sort that myself, so I'll pass this to one of my colleagues."),
     ("user", "Fine, put me through."),
 ]
+SATISFIED_HANGUP_CHAT = [
+    ("assistant", "Hello Alex, I'm Ava, your AI Assistant. I can help with your policy details, register a claim, or connect you with a human agent."),
+    ("user", "i want to know about my policy details"),
+    ("assistant", "Your comprehensive policy is active for a 2021 Toyota Corolla registered ABC 123, expiring on the sixteenth of October."),
+    ("user", "no i don't need anything else that's okay for me"),
+]
 DROPPED_CHAT = [
     ("assistant", "Hi, I'm Ava, your AI Assistant. I can help with your policy details, register a claim, or connect you with a human agent."),
     ("user", "Yeah hi, I wanted to check when my policy runs out—"),
@@ -189,6 +195,9 @@ SCENARIOS = [
      {"policyId": "POL-001", "claimId": "CLM-20260914-3"}, None, "completed"),
     ("hangup", ScriptedCall("hangup", DROPPED_CHAT), "caller_disconnected", False,
      {}, None, "caller_disconnected"),
+    # Answered, then hung up satisfied — the one case the transcript upgrades.
+    ("satisfied", ScriptedCall("satisfied", SATISFIED_HANGUP_CHAT),
+     "caller_disconnected", False, {"policyId": "POL-1001"}, None, "caller_disconnected"),
     ("queued", ScriptedCall("queued", ANGRY_CHAT,
                             escalation={"escalation_id": "esc-7f2a"}),
      "completed", False, {"policyId": "POL-001", "escalationId": "esc-7f2a"}, None, "completed"),
@@ -198,6 +207,38 @@ SCENARIOS = [
     ("error", ScriptedCall("error", DROPPED_CHAT), "error", False,
      {}, "RuntimeError: model stream closed", "error"),
 ]
+
+
+# Every attribute that is a key on the table or on one of its GSIs. A row
+# missing one of these is not an error — DynamoDB accepts the write and simply
+# leaves the row out of that index — so "this customer's cases" silently
+# returns nothing and no log line anywhere says why. Checked on the built item
+# rather than on a row read back, so --no-write catches it too, and checked
+# against the live table so adding an index without the field fails here.
+def check_index_keys() -> int:
+    print("=" * 68)
+    print("0. every index key attribute is actually written")
+    print("=" * 68)
+    table = boto3.client("dynamodb", region_name=cases.CASES_REGION).describe_table(
+        TableName=cases.CASES_TABLE)["Table"]
+    required = {k["AttributeName"] for k in table["KeySchema"]}
+    for gsi in table.get("GlobalSecondaryIndexes") or []:
+        required |= {k["AttributeName"] for k in gsi["KeySchema"]}
+
+    item = cases.build_case(
+        call=ScriptedCall("keys", CLAIM_CHAT), call_outcome="completed",
+        duration_seconds=1.0, human_handoff=False, mobile_number="+61400000001",
+        ids={"policyId": "POL-001"}, error=None)
+    written = {k for k, v in item.items() if cases._attr(v) is not None}
+
+    failures = 0
+    for name in sorted(required):
+        ok = name in written
+        failures += not ok
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}"
+              + ("" if ok else "  <-- MISSING: rows would vanish from that index"))
+    print()
+    return failures
 
 
 async def run_scenarios(write: bool) -> tuple[int, list[str]]:
@@ -238,6 +279,18 @@ async def run_scenarios(write: bool) -> tuple[int, list[str]]:
     return failures, written
 
 
+# What resolutionStatus should read on the table *after* the Bedrock pass.
+# Only "satisfied" differs from its derived value; everything else is untouched.
+EXPECTED_FINAL = {
+    "completed": "completed",
+    "hangup": "caller_disconnected",
+    "satisfied": "completed",          # upgraded from caller_disconnected
+    "queued": "completed",
+    "takeover": "human_handoff",
+    "error": "error",
+}
+
+
 def verify(case_ids: list[str]) -> int:
     print("=" * 68)
     print("3. reading the rows back")
@@ -255,18 +308,27 @@ def verify(case_ids: list[str]) -> int:
             continue
         row = {k: deserialize(v) for k, v in item.items()}
         blob = json.dumps(row, default=str)
+        label = case_id.split("-")[1]
         checks = [
             ("dob absent", "1990-01-15" not in blob),
+            (f"final status is {EXPECTED_FINAL.get(label)!r}",
+             row.get("resolutionStatus") == EXPECTED_FINAL.get(label)),
+            ("callOutcome keeps the raw connection fact",
+             row.get("callOutcome") in ("completed", "caller_disconnected", "error")),
             ("intent in set", row.get("customerIntent") in cases.CUSTOMER_INTENTS),
             ("status in set", row.get("resolutionStatus") in cases.RESOLUTION_STATUSES),
             ("status matches ledger vocabulary",
              row.get("resolutionStatus") in cases.RESOLUTION_STATUSES),
-            ("status is the derived one, not the model's", row.get("resolutionStatus")
-             == cases._derived_status(call_outcome=row.get("callOutcome", ""),
-                                      human_handoff=bool(row.get("humanHandoff")))),
-            ("createdAtAu is AU-formatted", _AU_STAMP.match(str(row.get("createdAtAu", "")))),
-            ("startedAtAu is AU-formatted", _AU_STAMP.match(str(row.get("startedAtAu", "")))),
-            ("createdAt still numeric/sortable", isinstance(row.get("createdAt"), Decimal)),
+            ("status never downgrades below derived",
+             row.get("resolutionStatus") == cases._derived_status(
+                 call_outcome=row.get("callOutcome", ""),
+                 human_handoff=bool(row.get("humanHandoff")))
+             or (row.get("resolutionStatus") == "completed"
+                 and row.get("callOutcome") == "caller_disconnected")),
+            ("createdAt is AU-formatted", _AU_STAMP.match(str(row.get("createdAt", "")))),
+            ("startedAt is AU-formatted", _AU_STAMP.match(str(row.get("startedAt", "")))),
+            ("createdAtAu gone", "createdAtAu" not in row),
+            ("startedAtAu gone", "startedAtAu" not in row),
             ("memorySessionId gone", "memorySessionId" not in row),
             ("escalated gone", "escalated" not in row),
             ("summaryModelId gone", "summaryModelId" not in row),
@@ -280,7 +342,11 @@ def verify(case_ids: list[str]) -> int:
                                and row.get("resolutionStatus") != "human_handoff")
         print(f"        status   : {row.get('resolutionStatus')}"
               f"{'   <-- asked for a human, never got one' if queued_never_joined else ''}")
-        print(f"        when     : {row.get('startedAtAu')} -> {row.get('createdAtAu')}")
+        derived = cases._derived_status(call_outcome=row.get("callOutcome", ""),
+                                        human_handoff=bool(row.get("humanHandoff")))
+        note = "   <-- upgraded from caller_disconnected" if row.get(
+            "resolutionStatus") != derived else ""
+        print(f"        when     : {row.get('startedAt')} -> {row.get('createdAt')}{note}")
         print(f"        summary  : {row.get('resolutionSummary', '')}")
         print(f"        ids      : policy={row.get('policyId', '-')} claim={row.get('claimId', '-')} esc={row.get('escalationId', '-')}")
         if bad:
@@ -311,7 +377,8 @@ async def main() -> int:
     print(f"\ntable   : {cases.CASES_TABLE} ({cases.CASES_REGION})")
     print(f"model   : {cases.CASE_SUMMARY_MODEL_ID or '(summarization disabled)'} ({cases.CASE_SUMMARY_REGION})\n")
 
-    failures = await check_id_extraction()
+    failures = check_index_keys()
+    failures += await check_id_extraction()
     scenario_failures, written = await run_scenarios(write)
     failures += scenario_failures
     if written:

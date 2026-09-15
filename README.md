@@ -386,11 +386,15 @@ still leave a row. Then, once the socket and the model session are closed and
 nobody is waiting any more, Bedrock reads the transcript and fills in the three
 judged fields. The identifiers come from what a **completed tool call actually
 returned**, never from what the caller said or the model passed in — the same
-provenance rule the grounding gate enforces during the call. The model owns
-`resolutionStatus`; what that was derived from (`callOutcome`, `humanHandoff`,
-and whether there is an `escalationId`) stays under names it never writes, so
-the machinery's own version is always recoverable and comparable. Timestamps
-are Sydney-local strings, as everywhere else here.
+provenance rule the grounding gate enforces during the call.
+
+`resolutionStatus` is derived from how the connection ended, with one exception
+the transcript is allowed to make: a caller who got their answer and hung up
+satisfied closes the socket identically to one who gave up, so the model's
+`callerNeedMet` upgrades `caller_disconnected` to `completed`. It only ever goes
+up, `error` and `human_handoff` are never model-writable, and `callOutcome`
+keeps the raw connection fact beside it. Timestamps are Sydney-local strings, as
+everywhere else here.
 
 ```bash
 CASES_TABLE=cases                                 # one row per finished call

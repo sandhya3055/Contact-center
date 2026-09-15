@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Create/update the Ava observability dashboard and its alarms.
+# Create/update the two Ava dashboards (Ava-Observability, Ava-KPIs) and the alarms.
 #
 # Split out of the deploy because neither is deployable by the IAM user this
 # repo is normally driven from: cloudwatch:PutDashboard and
@@ -18,11 +18,21 @@ ALARM_TOPIC_ARN="${ALARM_TOPIC_ARN:-}"
 LOG_GROUP="${LOG_GROUP:-/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "==> dashboard"
+echo "==> dashboards"
 aws cloudwatch put-dashboard --region "$REGION" \
   --dashboard-name Ava-Observability \
   --dashboard-body "file://$HERE/dashboard.json" >/dev/null
 echo "    https://$REGION.console.aws.amazon.com/cloudwatch/home?region=$REGION#dashboards/dashboard/Ava-Observability"
+
+# The contact-centre KPIs -- rates, not money. A second dashboard rather than
+# more rows on the first, because CloudWatch has no tabs and the two get read
+# by different people for different reasons: Ava-Observability answers "is it
+# working and what did it cost", Ava-KPIs answers "how is the contact centre
+# doing". Same ledger underneath, so they can never disagree.
+aws cloudwatch put-dashboard --region "$REGION" \
+  --dashboard-name Ava-KPIs \
+  --dashboard-body "file://$HERE/kpis_dashboard.json" >/dev/null
+echo "    https://$REGION.console.aws.amazon.com/cloudwatch/home?region=$REGION#dashboards/dashboard/Ava-KPIs"
 
 # Expanded below with the ${x[@]+...} guard rather than bare "${x[@]}":
 # macOS ships bash 3.2, where expanding an empty array under `set -u` is an
