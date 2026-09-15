@@ -147,6 +147,16 @@ set here too, or accept that the deployed agent doesn't have it.
 "HTTP includes both REST (`/invocations`) and WebSocket (`/ws`) endpoints."
 There's no separate `WEBSOCKET` protocol value.
 
+> **The live runtime has diverged from this example.** As of 2026-09-11
+> `ava_voice_agent-TVSWmk7feq` runs with `BEDROCK_REGION=us-west-2`, no
+> `OTEL_EXPORTER_OTLP_ENDPOINT` at all (the localhost:4318 trap described
+> below was already removed), plus `OTEL_TRACES_EXPORTER`,
+> `UNIFIED_TRACES_DESTINATION_ENABLED`, `BEDROCK_PROMPT_ID` and the Slack
+> settings. Always read the current environment back with
+> `get_agent_runtime` before an update — the call replaces rather than
+> merges, so anything you don't pass is deleted. `observability/deploy.sh`
+> does that for you.
+
 `BEDROCK_REGION` is set to `us-east-1` above (Nova 2 Sonic's default
 region) independently of `AWS_REGION` (your gateway's region, `us-west-2`)
 — they don't have to match; `strands_agent.py` already reads them as
@@ -275,6 +285,164 @@ aws logs filter-log-events --region us-west-2 --log-group-name aws/spans \
 
 Container-side problems show up in the runtime log group — grep it for
 `[telemetry]` (setup outcome) and `export span batch` (delivery failures).
+
+### Structured logs, and the per-call cost ledger
+
+`observability.py` is the second half of the picture: traces tell you what
+happened inside one call, this tells you which call, what it consumed, and
+what it cost. Everything it writes goes to stdout, which AgentCore already
+ships to the runtime log group — there is no second exporter and no new
+endpoint to configure.
+
+Three things it adds, and why each one was missing:
+
+1. **JSON log lines with a correlation key.** Every line carries `call_id`,
+   `session_id`, `trace_id` and `xray_trace_id`. `session_id` is the
+   AgentCore Runtime session — the *same* value AgentCore stamps on every
+   record in `/aws/vendedlogs/.../USAGE_LOGS/<agent>`, which is where the
+   call's billed vCPU-hours and GB-hours are. That single shared key is what
+   turns eight unrelated log groups into one queryable story.
+2. **Per-modality token counts.** Nova Sonic reports speech and text tokens
+   separately and bills them at very different rates; Strands'
+   `_convert_nova_event` keeps only the two totals and drops the breakdown
+   before anything downstream can see it. `_UsageCapturingNovaSonic` in
+   `strands_agent.py` overrides that one method to tap the raw event on its
+   way past. This is a real coupling to `strands-agents==1.54.0` — if a
+   version bump removes the method, the container fails at import rather
+   than quietly costing nothing.
+
+   **Do not use `gen_ai.usage.*` on the `bidi_session` span for cost.** Those
+   attributes are inflated by roughly two orders of magnitude. Strands' bidi
+   event loop does `self._accumulated_input_tokens += event.input_tokens`
+   (`strands/experimental/bidi/agent/loop.py`) against a Nova event whose
+   fields are named `totalInputTokens` and whose payload carries both a
+   `details.delta` and a `details.total` — a running total, summed as though
+   it were a delta. Measured against this account's own bill: spans reported
+   4.57M output tokens for 2026-09-09, and Cost Explorer billed a quantity
+   two orders of magnitude smaller for the same day. The `+=` is presumably
+   correct for Gemini and OpenAI Realtime, which is how it survives upstream.
+   `CallUsage` is the correct number; the span attribute is not.
+3. **A ledger line per finished call, as CloudWatch EMF.** CloudWatch parses
+   `_aws` out of any log group and publishes the fields as real metrics, so
+   `Ava/Calls` gets `CallCostUsd`, `CallDurationSeconds`, `InputTokens`,
+   `OutputTokens`, `ToolCalls`, `GateBlocks` and the four per-modality
+   counts with no `PutMetricData` call — no API throttling on a busy
+   container. `outcome` (`completed` / `caller_disconnected` / `escalated` /
+   `human_handoff` / `error`) is a metric dimension, so "escalated calls cost
+   3× and there are more this week" is a dashboard line rather than a query.
+
+**Set `NOVA_SONIC_PRICES_JSON` or there is no cost.** USD per 1M tokens,
+per modality:
+
+```
+NOVA_SONIC_PRICES_JSON={"speech_in":3.00,"text_in":0.319,"speech_out":12.00,"text_out":2.651}
+```
+
+Those are the **us-west-2** rates, derived from this account's own Cost
+Explorer: cost divided by `UsageQuantity` for each `USW2-NovaSonic2.0-*`
+usage type, with quantity in units of 1,000 tokens. That unit is an
+inference, but a safe one — the speech rates come out at exactly 3.00 and
+12.00, which no other unit produces. us-east-1 prices text differently
+(0.33 / 2.75), so re-derive if `BEDROCK_REGION` ever moves. `observability/
+reconcile.py` checks the whole thing against the actual bill.
+
+Real numbers, not placeholders: a malformed value is treated exactly like an
+unset one — `pricing.config_invalid` at ERROR, calls unaffected, no cost. If
+ledger lines read `cost_priced: false` while the variable is set, grep that
+event first.
+
+It deliberately has no default. Unset, every token count is still recorded
+and the ledger says `cost_priced: false`, and **no** `CallCostUsd` metric is
+published — publishing a $0 would read as "calls are cheap" rather than
+"cost is not configured", which is the worse failure. Prefer holding the
+value in SSM Parameter Store and injecting it at deploy time, so a price
+change isn't a redeploy.
+
+**Cumulative or delta is detected, not assumed.** Getting this wrong in
+either direction scales the whole cost figure, so `CallUsage` decides from
+the data: totals that never decrease are read as cumulative (keep the last),
+and the first value that drops proves they are per-interval deltas (sum them
+all, including the ones already seen). The conclusion appears on every ledger
+line as `usage_mode`, so a wrong inference shows up in the data rather than
+silently mispricing. If every call reports `usage_mode: delta`, the detection
+fired — check it against a `nova.usage.raw` sample before trusting the totals.
+
+**Verify the token field names on the first deploy.** The exact keys inside
+`usageEvent.details` are the one thing here never confirmed against live
+traffic — Strands discards that sub-object, and DEBUG logging has never been
+on in this container, so no sample of it exists anywhere in CloudWatch.
+`CallUsage.update()` reads it defensively (an unexpected shape degrades to
+"totals only, no cost", never to an exception in the model's receive loop),
+and the first three usage events of each process are logged verbatim as
+`nova.usage.raw`. After the next deploy, make one call and read them:
+
+```bash
+aws logs filter-log-events --region us-west-2 \
+  --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \
+  --start-time $(python3 -c "import time;print(int((time.time()-900)*1000))") \
+  --filter-pattern '"nova.usage.raw"' --query 'events[0].message' --output text
+```
+
+If `modality_split_available` is `false` on the ledger lines, that payload is
+what to tighten `update()` against.
+
+**Cost per call = model + compute.** The ledger covers Nova Sonic tokens. The
+runtime's own compute is in the usage logs, joinable on `session_id`:
+
+```
+fields @timestamp, attributes.session.id as session_id,
+       metrics.`agent.runtime.vcpu.hours.used` as vcpu_h,
+       metrics.`agent.runtime.memory.gb_hours.used` as gb_h
+| stats sum(vcpu_h) as vcpu, sum(gb_h) as gb by session_id
+```
+
+Both are estimates. Reconcile monthly against Cost Explorer — and **filter to
+`RECORD_TYPE = Usage`**, or the answer is always zero: this account's spend is
+currently fully offset by credits, so net `UnblendedCost` grouped by service
+nets to `-0.00` across the board while gross usage is real.
+
+```bash
+aws ce get-cost-and-usage --region us-east-1 \
+  --time-period Start=<YYYY-MM-DD>,End=<YYYY-MM-DD> --granularity MONTHLY \
+  --metrics UnblendedCost UsageQuantity \
+  --filter '{"And":[{"Dimensions":{"Key":"RECORD_TYPE","Values":["Usage"]}},
+                    {"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock","Amazon Bedrock AgentCore"]}}]}' \
+  --group-by Type=DIMENSION,Key=USAGE_TYPE
+```
+
+The `USE1-NovaSonic2.0-*-tokens` usage types are what `CallCostUsd` should add
+up to; `USW2-Runtime:Consumption-based:*` is the compute half. Worth knowing
+before you tune anything: over 2026-09-01→11 this agent's gross usage was
+**$21.83 AgentCore vs $3.35 Bedrock** — compute outweighs model tokens about
+6.5:1, so the ledger's `CallCostUsd` only ever explains a minority of the bill.
+More than ~10% drift on the Bedrock half means the price table, the modality
+mapping, or `usage_mode` is wrong.
+
+### Bedrock model invocation logging is per-region
+
+Model traffic from this project lands in **two** regions, and each needs its
+own logging configuration:
+
+- **The deployed runtime calls us-west-2.** `BEDROCK_REGION` on
+  `ava_voice_agent-TVSWmk7feq` is `us-west-2`, not the `us-east-1` the
+  §3 example above shows — that example is the original setup and the live
+  runtime has since diverged from it. Read the runtime, not this file, before
+  acting on the region.
+- **Local runs and evals call us-east-1**, via `AWS_REGION` in the repo's
+  `.env`. Cost Explorer shows both `USW2-NovaSonic2.0-*` and
+  `USE1-NovaSonic2.0-*` usage types for exactly this reason.
+
+Invocation logging is now on in both. us-east-1 needed its own delivery role
+(`bedrock-model-logging-us-east-1`), because the us-west-2 one is hard-scoped
+to that region in both its trust policy's `aws:SourceArn` and its permissions
+policy's log-group ARN.
+
+Note that bidirectional-streaming coverage in invocation logs is thinner than
+for `InvokeModel`, so treat an empty `model-invocation-logs` group in us-east-1
+as expected rather than broken — `observability.py`'s in-process capture is the
+authoritative source either way. Also note this group receives caller
+transcripts: names, dates of birth, policy numbers. It carries a 30-day
+retention for that reason.
 
 ## 4. Deploy the Lambda
 

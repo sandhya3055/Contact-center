@@ -1,0 +1,936 @@
+{
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 1,
+      "properties": {
+        "markdown": "## Per call\nEvery widget below moves within about a minute of a call ending. If a call happened and these did not change, the ledger line was lost — see **Ledger integrity**."
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 1,
+      "width": 6,
+      "height": 4,
+      "properties": {
+        "title": "Model cost (range total)",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Sum",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "USD"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 6,
+      "y": 1,
+      "width": 6,
+      "height": 4,
+      "properties": {
+        "title": "Calls",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Sum",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "calls"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 1,
+      "width": 6,
+      "height": 4,
+      "properties": {
+        "title": "Cost per call (avg)",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Average",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "USD/call"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 18,
+      "y": 1,
+      "width": 6,
+      "height": 4,
+      "properties": {
+        "title": "Call duration (avg)",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Average",
+        "period": 300,
+        "setPeriodToTimeRange": true,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallDurationSeconds",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "seconds"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 5,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Model cost by outcome (USD per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "completed",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "completed",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "caller_disconnected",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "caller_disconnected",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "escalated",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "escalated",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "human_handoff",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "human_handoff",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "CallCostUsd",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "error",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "error",
+              "id": "e4"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 5,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Calls by outcome (per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "completed",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "completed",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "caller_disconnected",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "caller_disconnected",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "escalated",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "escalated",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "human_handoff",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "human_handoff",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            "outcome",
+            "error",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "error",
+              "id": "e4"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 11,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Call duration (seconds)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stat": "Maximum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallDurationSeconds",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "longest call in window",
+              "id": "e0"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 11,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Tool calls and gate blocks",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "ToolCalls",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "tool calls",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "GateBlocks",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "gate blocks",
+              "id": "e1"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 11,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Tokens by modality (per 5 min)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": true,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "TextInTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "TextInTokens",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "SpeechInTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "SpeechInTokens",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "SpeechOutTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "SpeechOutTokens",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Calls",
+            "TextOutTokens",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "TextOutTokens",
+              "id": "e3"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 17,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "region": "us-west-2",
+        "title": "Ledger integrity — every ending owes a ledger line (lost should stay flat at 0)",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [
+          [
+            "Ava/Calls",
+            "CallsEnded",
+            {
+              "id": "ended",
+              "visible": false
+            }
+          ],
+          [
+            "Ava/Calls",
+            "Calls",
+            "service",
+            "ava-voice-agent",
+            {
+              "id": "ledg",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(ended,0)",
+              "label": "calls ended",
+              "id": "e1"
+            }
+          ],
+          [
+            {
+              "expression": "FILL(ledg,0)",
+              "label": "ledger lines written",
+              "id": "e2"
+            }
+          ],
+          [
+            {
+              "expression": "FILL(ended,0)-FILL(ledg,0)",
+              "label": "LOST",
+              "id": "e3"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "log",
+      "x": 12,
+      "y": 17,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Runtime compute per session — seconds_alive vs call duration is where the money goes",
+        "region": "us-west-2",
+        "view": "table",
+        "query": "SOURCE '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ava_voice_agent-TVSWmk7feq'\n| fields `attributes.session.id` as session_id,\n         `metrics.agent.runtime.vcpu.hours.used` as vcpu_h,\n         `metrics.agent.runtime.memory.gb_hours.used` as gb_h\n| stats count(*) as seconds_alive,\n        sum(vcpu_h) as vcpu_hours,\n        sum(gb_h) as gb_hours,\n        sum(vcpu_h)*0.0895 + sum(gb_h)*0.00945 as compute_usd\n    by session_id\n| sort compute_usd desc\n| limit 25"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 23,
+      "width": 24,
+      "height": 7,
+      "properties": {
+        "title": "Call ledger — one row per finished call",
+        "region": "us-west-2",
+        "view": "table",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| fields @timestamp, call_id, outcome, CallDurationSeconds as secs, CallCostUsd as usd, ToolCalls as tools, GateBlocks as gates, InputTokens as tok_in, OutputTokens as tok_out, transcript_turns as turns, usage_mode, cost_priced\n| filter event = \"call.ledger\"\n| sort @timestamp desc\n| limit 50"
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 30,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "title": "Errors and refusals (agent + tool Lambda) — three benign per-call warnings filtered out",
+        "region": "us-west-2",
+        "view": "table",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT' | SOURCE '/aws/lambda/insurarncae-voice-agent-mcp-tool'\n| fields @timestamp, service, call_id, session_id, event, msg, error\n| filter level in [\"ERROR\", \"WARNING\"]\n| filter level = \"ERROR\"\n    or not ispresent(logger)\n    or (logger not in [\"bedrock_agentcore.memory.integrations.strands.session_manager\",\n                       \"opentelemetry.instrumentation.instrumentor\"]\n        and msg not like \"Invalid HTTP request\")\n| sort @timestamp desc\n| limit 50"
+      }
+    },
+    {
+      "type": "text",
+      "x": 0,
+      "y": 36,
+      "width": 24,
+      "height": 1,
+      "properties": {
+        "markdown": "## Account spend\n**These four do not move when a call ends.** They are Cost Explorer's daily figures, published by the `ava-cost-publisher` Lambda, and AWS settles them about three days late — so a call made today shows up here on Sunday, not now."
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 37,
+      "width": 16,
+      "height": 8,
+      "properties": {
+        "title": "AWS cost by category (daily — plotted when learned, ~3 days after the spend)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "RuntimeCompute",
+            {
+              "id": "m0",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m0,0)",
+              "label": "RuntimeCompute",
+              "id": "e0"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ModelProduction",
+            {
+              "id": "m1",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m1,0)",
+              "label": "ModelProduction",
+              "id": "e1"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ModelDevEval",
+            {
+              "id": "m2",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m2,0)",
+              "label": "ModelDevEval",
+              "id": "e2"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "AgentCoreMemory",
+            {
+              "id": "m3",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m3,0)",
+              "label": "AgentCoreMemory",
+              "id": "e3"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "AgentCoreGateway",
+            {
+              "id": "m4",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m4,0)",
+              "label": "AgentCoreGateway",
+              "id": "e4"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "OtherBedrockModels",
+            {
+              "id": "m5",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m5,0)",
+              "label": "OtherBedrockModels",
+              "id": "e5"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "ContainerImages",
+            {
+              "id": "m6",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m6,0)",
+              "label": "ContainerImages",
+              "id": "e6"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "Observability",
+            {
+              "id": "m7",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m7,0)",
+              "label": "Observability",
+              "id": "e7"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "PortalHosting",
+            {
+              "id": "m8",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m8,0)",
+              "label": "PortalHosting",
+              "id": "e8"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            "category",
+            "Glue",
+            {
+              "id": "m9",
+              "visible": false
+            }
+          ],
+          [
+            {
+              "expression": "FILL(m9,0)",
+              "label": "Glue",
+              "id": "e9"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD/day",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 37,
+      "width": 8,
+      "height": 4,
+      "properties": {
+        "title": "This agent vs rest of account (daily, ~3-day lag)",
+        "region": "us-west-2",
+        "view": "timeSeries",
+        "stacked": false,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "this agent"
+            }
+          ],
+          [
+            "Ava/Cost",
+            "DailyCostUsd",
+            "service",
+            "other-projects",
+            {
+              "label": "other projects"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "label": "USD/day",
+            "showUnits": false
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 41,
+      "width": 4,
+      "height": 4,
+      "properties": {
+        "title": "ECR images",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "EcrImages",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "images"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 20,
+      "y": 41,
+      "width": 4,
+      "height": 4,
+      "properties": {
+        "title": "ECR storage",
+        "region": "us-west-2",
+        "view": "singleValue",
+        "sparkline": true,
+        "stat": "Maximum",
+        "period": 86400,
+        "metrics": [
+          [
+            "Ava/Cost",
+            "EcrStorageGB",
+            "service",
+            "ava-voice-agent",
+            {
+              "label": "GB"
+            }
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1467,6 +1467,11 @@ async function start() {
       console.warn('[ava] could not read the session id out of the call URL', err);
     }
 
+    // Set when Ava ends the call herself (she sends bidi_call_ended just
+    // before the socket closes). Without it every ending looks identical to
+    // the caller, including the ones where the call simply dropped.
+    let endedByAva = false;
+
     ws = new WebSocket(url);
 
     ws.onopen = async () => {
@@ -1526,6 +1531,9 @@ async function start() {
       if (data.type === 'bidi_handoff') {
         applyHandoff(data);
       }
+      if (data.type === 'bidi_call_ended') {
+        endedByAva = true;
+      }
       if (data.type === 'bidi_call_metadata_update' && data.mobile_number) {
         // Ava confirmed a different number than what the UI pre-filled —
         // e.g. the caller corrected a wrong one mid-call (see the "Phone
@@ -1545,7 +1553,7 @@ async function start() {
       ws = null;
       setStatus('idle', 'Call ended');
       stopCallTimer();
-      addSystemLine('Call ended.');
+      addSystemLine(endedByAva ? 'Ava ended the call.' : 'Call ended.');
       stopMic();
       setMuted(false);
       setCallUiState(false);

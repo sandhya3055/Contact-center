@@ -19,6 +19,7 @@ parsing lives in one place and the config arrives as arguments.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -168,7 +169,14 @@ def build_context(
                     "asynchronously during the call, so it can lag by a few seconds.")
         except Exception as exc:
             context["notes"].append(f"Couldn't read AgentCore Memory: {exc}")
-            print(f"[portal_context] memory read failed: {exc}")
+            # The stdlib logger, not agentcore_app/observability.py: this
+            # file is byte-identical to lambda/portal_context.py and has to
+            # import cleanly in both. In the container the root handler is
+            # the JSON formatter, so this comes out structured anyway.
+            logging.getLogger(__name__).warning(
+                "memory read failed",
+                extra={"fields": {"event_name": "portal_context.memory_read_failed",
+                                  "error": str(exc)}})
     elif not memory_id:
         context["notes"].append("MEMORY_ID isn't set, so this call isn't being persisted.")
     elif not (memory_actor_id and memory_session_id):

@@ -30,7 +30,10 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.lock.txt
 
 # portal.html is read at request time by handoff.py, so it has to ship too.
-COPY strands_agent.py handoff.py portal_context.py portal.html ./
+# observability.py is imported at the top of strands_agent.py — omit it and
+# the container fails at import with ModuleNotFoundError, before /ping ever
+# answers, so the deploy fails loudly rather than running without logging.
+COPY strands_agent.py handoff.py portal_context.py observability.py portal.html ./
 
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app

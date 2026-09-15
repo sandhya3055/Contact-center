@@ -74,6 +74,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import portal_context
+# Same JSON shape, same call_id/session_id/trace_id, same log group as the
+# agent's own lines — a handoff is part of the call, not a separate story.
+from observability import event
 
 # Where the Slack message's button points. Must be reachable by whoever clicks
 # it in Slack -- http://127.0.0.1:8080 while developing locally, your public
@@ -385,8 +388,9 @@ class LiveCall:
             await asyncio.wait_for(
                 asyncio.to_thread(_write_portal_row, escalation_id, fields), timeout=4)
         except Exception as exc:
-            print(f"[handoff] couldn't stamp portal keys on {escalation_id}: {exc} "
-                  "— a portal hosted off this container won't resolve this call")
+            event("handoff.portal_keys_stamp_failed", escalation_id=escalation_id,
+                  error=str(exc),
+                  impact="a portal hosted off this container won't resolve this call")
 
     def portal_url(self) -> str:
         query = f"call={self.call_id}&token={self.join_token}"
@@ -437,7 +441,7 @@ class LiveCall:
             try:
                 self.request_ai_disconnect()
             except Exception as exc:
-                print(f"[handoff] couldn't ask the AI to leave {self.call_id}: {exc}")
+                event("handoff.ai_disconnect_request_failed", call=self.call_id, error=str(exc))
 
         await self.push_state()
         await self.to_customer({
@@ -445,7 +449,7 @@ class LiveCall:
             "state": STATE_HUMAN,
             "agent_name": self.human_label,
         })
-        print(f"[handoff] {self.human_label} joined call {self.call_id}")
+        event("handoff.human_joined", call=self.call_id, human_label=self.human_label)
 
     async def mark_ai_disconnected(self) -> None:
         """Ava's session is really gone — called by strands_agent.py once the
@@ -474,7 +478,7 @@ class LiveCall:
                 "ai_available": not self.ai_disconnected,
             })
         await self.push_state()
-        print(f"[handoff] {label} {reason} call {self.call_id}")
+        event("handoff.human_left", call=self.call_id, human_label=label, reason=reason)
 
     async def mark_ended(self) -> None:
         self.state = STATE_ENDED
@@ -504,7 +508,7 @@ async def load_context(call: LiveCall) -> dict[str, Any]:
                 ESCALATIONS_TABLE, ESCALATIONS_REGION, escalation_id)
         except Exception as exc:
             row_error = f"Couldn't read the escalations table: {exc}"
-            print(f"[handoff] escalations table read failed: {exc}")
+            event("handoff.escalations_read_failed", error=str(exc))
 
     return await asyncio.to_thread(
         portal_context.build_context,
@@ -653,7 +657,7 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
     """Post the escalation to Slack. Never raises: a failed notification must
     not break the call the caller is still on — the link is printed either
     way, so a local run without Slack configured is still usable."""
-    print(f"[handoff] escalation on call {call.call_id} — portal: {portal_url}")
+    event("handoff.escalated", call=call.call_id, portal_url=portal_url)
     # The link is about to become clickable, so let the row that authorizes it
     # land first. Off the caller's critical path — they're hearing Ava say a
     # colleague is coming — and bounded, because a stuck write must not swallow
@@ -664,8 +668,8 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
         except Exception:
             pass
     if not (SLACK_BOT_TOKEN and SLACK_ESCALATION_CHANNEL):
-        print("[handoff] SLACK_BOT_TOKEN/SLACK_ESCALATION_CHANNEL not set — "
-              "not posting to Slack; use the portal link above")
+        event("handoff.slack_not_configured",
+              missing="SLACK_BOT_TOKEN/SLACK_ESCALATION_CHANNEL")
         return
 
     details = (call.escalation or {}).get("details", {}) or {}
@@ -678,9 +682,9 @@ async def notify_slack(call: LiveCall, portal_url: str) -> None:
     }
     try:
         await asyncio.to_thread(_post_to_slack, payload)
-        print(f"[handoff] posted escalation for call {call.call_id} to {SLACK_ESCALATION_CHANNEL}")
+        event("handoff.slack_posted", call=call.call_id, channel=SLACK_ESCALATION_CHANNEL)
     except Exception as exc:
-        print(f"[handoff] failed to post to Slack: {exc}")
+        event("handoff.slack_post_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------- portal API
@@ -708,7 +712,7 @@ def install_portal_cors(app: Any) -> None:
         allow_headers=["*"],
         allow_credentials=False,
     )
-    print(f"[handoff] portal CORS enabled for {PORTAL_ALLOWED_ORIGINS}")
+    event("handoff.portal_cors_enabled", origins=PORTAL_ALLOWED_ORIGINS)
 
 
 def _authorized(call_id: str, token: str) -> LiveCall | None:
@@ -826,8 +830,8 @@ async def portal_ws(websocket: WebSocket, call_id: str, token: str = "") -> None
     """
     origin = websocket.headers.get("origin")
     if not origin_allowed(origin):
-        print(f"[handoff] refused portal socket from origin {origin!r} "
-              f"(allowed: {PORTAL_ALLOWED_ORIGINS})")
+        event("handoff.portal_socket_refused", origin=origin,
+              allowed=PORTAL_ALLOWED_ORIGINS)
         await websocket.close(code=4403)
         return
 
@@ -886,8 +890,8 @@ async def serve_portal_socket(websocket: WebSocket, attach: dict[str, Any]) -> N
 
     call = _authorized(call_id, token)
     if call is None:
-        print(f"[handoff] portal attach refused for call {call_id!r} — "
-              f"{'not in this instance' if call_id not in LIVE_CALLS else 'bad token'}")
+        event("handoff.portal_attach_refused", call=call_id,
+              reason="not in this instance" if call_id not in LIVE_CALLS else "bad token")
         try:
             await websocket.send_json({
                 "type": "error",
@@ -903,7 +907,7 @@ async def serve_portal_socket(websocket: WebSocket, attach: dict[str, Any]) -> N
         await websocket.close(code=4403)
         return
 
-    print(f"[handoff] portal attached to call {call.call_id} over the runtime socket")
+    event("handoff.portal_attached", call=call.call_id)
     await _serve_portal(websocket, call)
 
 
@@ -921,7 +925,7 @@ async def _serve_portal(websocket: WebSocket, call: LiveCall) -> None:
         try:
             await websocket.send_json({"type": "context", **await load_context(call)})
         except Exception as exc:
-            print(f"[handoff] context load failed for {call.call_id}: {exc}")
+            event("handoff.context_load_failed", call=call.call_id, error=str(exc))
 
     # Tasks are held here only so asyncio doesn't collect one nothing else
     # references; each drops itself when it finishes.
@@ -952,6 +956,6 @@ async def _serve_portal(websocket: WebSocket, call: LiveCall) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        print(f"[handoff] portal socket error on call {call.call_id}: {exc}")
+        event("handoff.portal_socket_error", call=call.call_id, error=str(exc))
     finally:
         await call.detach_portal(websocket)
