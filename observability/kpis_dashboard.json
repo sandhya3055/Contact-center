@@ -7,16 +7,16 @@
       "x": 0,
       "y": 0,
       "width": 24,
-      "height": 3,
+      "height": 2,
       "properties": {
-        "markdown": "# Contact-centre KPIs — Nexora / Ava\nRates, resolution and unit cost. Ledger integrity, token detail and the raw account bill live on **[Ava-Observability](/cloudwatch/home?region=us-west-2#dashboards/dashboard/Ava-Observability)**.\n\nTwo ways of counting, kept apart on purpose, because they answer different questions and are *allowed* to disagree: the **connection view** (`call.ledger` EMF metrics, ~1 min) asks how the connection ended; the **need view** (`case.summarized`, minutes later, a model reads the transcript) asks whether the caller got what they rang for. A caller who got their answer and hung up satisfied leaves a socket identical to an abandoned one — so **the abandonment tile is an upper bound** and the need view further down is the figure to quote.\n\nTrends are plotted **daily**. Sub-daily buckets at the current call volume are mostly empty and read as an outage rather than as a quiet afternoon. Widen the time range at the top right and the charts stay daily; change the period per widget if volume grows.",
+        "markdown": "# Contact-centre KPIs — INSUVOX / Ava\nCounting from zero since **2026-09-14 12:12 UTC**. Nothing was deleted; widen the range to reach older data.\nLedger integrity, tokens and raw spend: **[Ava-Observability](/cloudwatch/home?region=us-west-2#dashboards/dashboard/Ava-Observability)**. Definitions and caveats: `observability/README.md`.",
         "region": "us-west-2"
       }
     },
     {
       "type": "metric",
       "x": 0,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -52,7 +52,7 @@
     {
       "type": "metric",
       "x": 4,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -101,7 +101,7 @@
     {
       "type": "metric",
       "x": 8,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -139,7 +139,7 @@
           [
             {
               "expression": "100*FILL(ab,0)/all",
-              "label": "% caller dropped",
+              "label": "% dropped · upper bound",
               "id": "kpi"
             }
           ]
@@ -150,7 +150,7 @@
     {
       "type": "metric",
       "x": 12,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -199,7 +199,7 @@
     {
       "type": "metric",
       "x": 16,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -237,7 +237,7 @@
           [
             {
               "expression": "100*(all-FILL(ho,0))/all",
-              "label": "% Ava kept",
+              "label": "% Ava kept · incl. dropped",
               "id": "kpi"
             }
           ]
@@ -248,7 +248,7 @@
     {
       "type": "metric",
       "x": 20,
-      "y": 3,
+      "y": 2,
       "width": 4,
       "height": 4,
       "properties": {
@@ -297,11 +297,11 @@
     {
       "type": "metric",
       "x": 0,
-      "y": 7,
+      "y": 6,
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "KPI trend — outcome rates by day (connection view)",
+        "title": "Outcome rates by day",
         "view": "timeSeries",
         "stacked": false,
         "stat": "Sum",
@@ -413,11 +413,11 @@
     {
       "type": "metric",
       "x": 12,
-      "y": 7,
+      "y": 6,
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "Volume and AHT by day — average handle time against how many rang",
+        "title": "Volume and average handle time, by day",
         "view": "timeSeries",
         "stacked": false,
         "stat": "Average",
@@ -473,22 +473,22 @@
     {
       "type": "text",
       "x": 0,
-      "y": 13,
+      "y": 12,
       "width": 24,
-      "height": 4,
+      "height": 2,
       "properties": {
-        "markdown": "## Counting from zero — reset 2026-09-14T12:12:19.000Z\n**This dashboard is zeroed at the timestamp above and counts nothing before it.** The window is absolute and open-ended, so it is always \"everything since the reset\" and every widget started at 0.\n\nThat was the point of resetting: **every instrument was already live before this moment** — `call.ledger` since 09-11, `call.teardown` since 09-11 11:38, `case.written` / `case.summarized` since the 09-14 08:48 deploy. So the three counts below are now measuring the same population and **should agree**.\n\nWhich makes this section an alarm rather than an excuse. Before the reset a short count meant \"instrumented later\"; from here it cannot. **If `call.ledger` trails `call.teardown` now, calls are losing their ledger** — they happened, cost money, and appear in no metric. That is a live bug, not a coverage artifact. Two calls did exactly this on 09-14 (`9a7708f746c0`, `abc63b434f8f`); `Ava-LedgerLost` is built to catch it and has never been applied.\n\nWidening the range at the top right still shows the older data — CloudWatch metrics cannot be deleted, only aged out — so nothing has been destroyed, and the pre-reset history stays one click away.",
+        "markdown": "## Coverage — check this before comparing any two numbers\nRecords are written in order (`call.teardown` → `call.ledger` → `case.*`) and every instrument was already live at the reset, so **these counts should now agree**. A short `call.ledger` no longer means \"instrumented later\" — it means calls are losing their ledger, which `Ava-LedgerLost` is built to catch.",
         "region": "us-west-2"
       }
     },
     {
       "type": "log",
       "x": 0,
-      "y": 17,
+      "y": 14,
       "width": 7,
       "height": 6,
       "properties": {
-        "title": "Coverage — how many calls each source can see",
+        "title": "Records per source",
         "view": "bar",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event in [\"call.teardown\",\"call.ledger\",\"case.written\",\"case.summarized\"]\n| stats count(*) as records by event\n| sort records desc",
         "region": "us-west-2"
@@ -497,11 +497,11 @@
     {
       "type": "log",
       "x": 7,
-      "y": 17,
+      "y": 14,
       "width": 9,
       "height": 6,
       "properties": {
-        "title": "When each source started — a line that begins late was instrumented late",
+        "title": "Records per source, by day",
         "view": "line",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event in [\"call.teardown\",\"call.ledger\",\"case.written\",\"case.summarized\"]\n| stats count(*) as records by bin(1d), event",
         "region": "us-west-2"
@@ -510,31 +510,31 @@
     {
       "type": "log",
       "x": 16,
-      "y": 17,
+      "y": 14,
       "width": 8,
       "height": 6,
       "properties": {
-        "title": "Is the cost complete? — priced vs unpriced, by how usage was read",
+        "title": "Cost completeness — priced vs unpriced",
         "view": "table",
-        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| stats count(*) as calls,\n        sum(cost_priced) as priced,\n        count(*) - sum(cost_priced) as unpriced,\n        sum(CallCostUsd) as total_usd,\n        avg(CallCostUsd) as avg_usd,\n        sum(CallCostUsd)*60/sum(CallDurationSeconds) as usd_per_talk_min\n    by usage_mode\n| sort calls desc",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| stats count(*) as calls,\n        sum(cost_priced) as priced,\n        count(*) - sum(cost_priced) as unpriced,\n        sum(CallCostUsd) as total_usd,\n        avg(CallCostUsd) as avg_usd_priced_only,\n        sum(CallCostUsd)*60/sum(CallDurationSeconds) as usd_per_talk_min\n    by usage_mode\n| sort calls desc",
         "region": "us-west-2"
       }
     },
     {
       "type": "text",
       "x": 0,
-      "y": 23,
+      "y": 20,
       "width": 24,
       "height": 2,
       "properties": {
-        "markdown": "## Escalation, engagement and quality proxies\n`escalated`, `transcript_turns` and `tool_errors` are **fields on the `call.ledger` line, not CloudWatch metrics** — the EMF block publishes only Calls, duration, tokens, tool calls, gate blocks and cost. So these are Logs Insights queries: retroactive over log retention, but they cannot be alarmed on. Promoting them means adding to the `metrics` list in `emit_call_ledger`.",
+        "markdown": "## Escalation, engagement and quality proxies\n`escalated`, `transcript_turns` and `tool_errors` are fields on `call.ledger`, not metrics — the EMF block publishes only Calls, duration, tokens, tool calls, gate blocks and cost. These are Logs Insights queries: retroactive, but not alarmable. Rates are `sum/count(*)`, so a missing field counts as \"not X\".",
         "region": "us-west-2"
       }
     },
     {
       "type": "log",
       "x": 0,
-      "y": 25,
+      "y": 22,
       "width": 8,
       "height": 6,
       "properties": {
@@ -547,7 +547,7 @@
     {
       "type": "log",
       "x": 8,
-      "y": 25,
+      "y": 22,
       "width": 8,
       "height": 6,
       "properties": {
@@ -560,11 +560,11 @@
     {
       "type": "log",
       "x": 16,
-      "y": 25,
+      "y": 22,
       "width": 8,
       "height": 6,
       "properties": {
-        "title": "Quality proxies — NOT a quality score (see foot of dashboard)",
+        "title": "Quality proxies (not a quality score — see footer)",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| fields least(GateBlocks, 1) as hit_gate, least(tool_errors, 1) as hit_tool_error\n| stats count(*) as calls,\n        sum(GateBlocks)/count(*) as gate_blocks_per_call,\n        sum(hit_gate)*100.0/count(*) as calls_with_gate_block_pct,\n        sum(tool_errors)/count(*) as tool_errors_per_call,\n        sum(hit_tool_error)*100.0/count(*) as calls_with_tool_error_pct",
         "region": "us-west-2"
@@ -573,11 +573,11 @@
     {
       "type": "log",
       "x": 0,
-      "y": 31,
+      "y": 28,
       "width": 24,
       "height": 6,
       "properties": {
-        "title": "Escalation and engagement trend, by day",
+        "title": "Escalation and engagement, by day",
         "view": "line",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| fields greatest(least(transcript_turns - 1, 1), 0) as engaged,\n         least(ToolCalls, 1) as transacted\n| stats sum(escalated)*100.0/count(*) as escalation_pct,\n        sum(human_handoff)*100.0/count(*) as handoff_pct,\n        sum(engaged)*100.0/count(*) as engagement_pct,\n        sum(transacted)*100.0/count(*) as transacted_pct\n    by bin(1d)",
         "region": "us-west-2"
@@ -586,22 +586,22 @@
     {
       "type": "text",
       "x": 0,
-      "y": 37,
+      "y": 34,
       "width": 24,
-      "height": 5,
+      "height": 3,
       "properties": {
-        "markdown": "## Need view, and first contact resolution\nFrom `case.summarized` / `case.written` — written only after a model reads the transcript, so these trail the tiles above and cover fewer calls (see coverage, above). `customer_intent` and `resolution_status` are closed sets (`cases.py`), which is what makes them countable at all.\n\nA `not recorded` slice is **not a resolution category** — it is a case whose log line predates the field. `case.summarized` gained `resolution_status`, `derived_status`, `caller_need_met` and `upgraded` in a deploy on 2026-09-14 around 08:48; rows written before it carry only `case_id` and `customer_intent`. Those rows are counted (they are real calls) and labelled, never silently dropped.\n\nEvery rate here is `sum(x)/count(*)`, never `avg(x)`. Logs Insights' `avg` skips rows where the field is absent while `count(*)` keeps them, so `avg` on a partly-populated field silently shrinks its own denominator — it read 60% where 3 of 7 cases were resolved, because only 5 rows carried the field. `rows_judged` next to `cases` is how you see that gap rather than infer it.\n\n**FCR is shown as two halves and deliberately not averaged into one number.** *Resolved on the call* is the transcript's judgement (`caller_need_met`). *No repeat contact* is whether that policy rang again — and since Logs Insights cannot nest aggregations, it is reported as `unique policies ÷ contacts`, with the offending policies listed beside it. A call can pass the first and fail the second; true FCR needs both.",
+        "markdown": "## Resolution and first contact resolution\nFrom `case.*`, written after a model reads the transcript — so a satisfied hang-up can be upgraded from `caller_disconnected` to `completed`, which is why the abandonment tile up top is an upper bound.\n\n**FCR is two halves, deliberately not averaged.** *Resolved on the call* is the transcript's judgement; *no repeat contact* is whether that policy rang again (reported as `unique policies ÷ contacts`, since Logs Insights cannot nest aggregations). `rows_judged` below `cases` shows how many rows actually carried the judgement. A `not recorded` slice is a row predating the field, not a resolution category.",
         "region": "us-west-2"
       }
     },
     {
       "type": "log",
       "x": 0,
-      "y": 42,
+      "y": 37,
       "width": 8,
       "height": 6,
       "properties": {
-        "title": "Resolution mix — need view",
+        "title": "Resolution mix",
         "view": "pie",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"case.summarized\"\n| stats count(*) as calls by coalesce(resolution_status, \"not recorded\") as resolution\n| sort calls desc",
         "region": "us-west-2"
@@ -610,7 +610,7 @@
     {
       "type": "log",
       "x": 8,
-      "y": 42,
+      "y": 37,
       "width": 8,
       "height": 6,
       "properties": {
@@ -623,11 +623,11 @@
     {
       "type": "log",
       "x": 16,
-      "y": 42,
+      "y": 37,
       "width": 8,
       "height": 6,
       "properties": {
-        "title": "FCR half 1 — resolved on the call, and how often the transcript overruled the socket",
+        "title": "FCR half 1 — resolved on the call",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"case.summarized\"\n| stats count(*) as cases,\n        count(caller_need_met) as rows_judged,\n        sum(caller_need_met) as resolved_on_call,\n        sum(caller_need_met)*100.0/count(*) as resolved_on_call_pct,\n        sum(upgraded) as upgraded,\n        sum(upgraded)*100.0/count(*) as upgraded_pct",
         "region": "us-west-2"
@@ -636,11 +636,11 @@
     {
       "type": "log",
       "x": 0,
-      "y": 48,
+      "y": 43,
       "width": 8,
       "height": 6,
       "properties": {
-        "title": "FCR half 2 — repeat contact rate (ringing twice fails FCR however well each call went)",
+        "title": "FCR half 2 — repeat contact rate",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"case.written\" and ispresent(policy_id)\n| stats count(*) as contacts,\n        count_distinct(policy_id) as unique_policies,\n        count(*) - count_distinct(policy_id) as repeat_contacts,\n        100.0*count_distinct(policy_id)/count(*) as first_contact_pct,\n        100.0*(count(*) - count_distinct(policy_id))/count(*) as repeat_contact_pct",
         "region": "us-west-2"
@@ -649,7 +649,7 @@
     {
       "type": "log",
       "x": 8,
-      "y": 48,
+      "y": 43,
       "width": 16,
       "height": 6,
       "properties": {
@@ -662,11 +662,11 @@
     {
       "type": "log",
       "x": 0,
-      "y": 54,
+      "y": 49,
       "width": 24,
       "height": 6,
       "properties": {
-        "title": "Connection view vs need view — every disagreement, with its intent",
+        "title": "Connection view vs need view — every disagreement",
         "view": "table",
         "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"case.summarized\"\n| stats count(*) as calls by coalesce(derived_status, \"not recorded\") as connection_view,\n                            coalesce(resolution_status, \"not recorded\") as need_view,\n                            coalesce(customer_intent, \"not recorded\") as intent\n| sort calls desc\n| limit 50",
         "region": "us-west-2"
@@ -675,18 +675,18 @@
     {
       "type": "text",
       "x": 0,
-      "y": 60,
+      "y": 55,
       "width": 24,
-      "height": 4,
+      "height": 3,
       "properties": {
-        "markdown": "## Cost — three different numbers, and you must not add them up\n| Layer | Metric | What it is | Lag |\n|---|---|---|---|\n| **Per call** | `Ava/Calls CallCostUsd` | Nova Sonic, priced from the call's own token counts | ~1 min |\n| **Per service** | `Ava/Cost DailyCostUsd` by `category` | what AWS actually **billed** | ~3 days |\n| **Runtime compute** | AgentCore usage logs | vCPU/GB-hours a session held open — on Ava-Observability | ~1 min |\n\n`ModelProduction` in the breakdown **is the same money as `CallCostUsd`**, counted the other way round: our estimate from tokens versus the bill. `cost_categories.py` says so in `CATEGORIES` (`\"ledger: CallCostUsd\"`). Adding them double-counts; comparing them is the monthly reconciliation (`reconcile.py`).\n\nNo cost tile fills a gap with zero. An unpriced range reads **No data**, never $0.00 — and if the coverage widget shows any `unpriced` calls, every figure here is understated, because cost averages over priced calls while `Calls` counts all of them.",
+        "markdown": "## Cost — three layers, never summed\n| Layer | Metric | What it is | Lag |\n|---|---|---|---|\n| Per call | `Ava/Calls CallCostUsd` | Nova Sonic, priced from the call's own tokens | ~1 min |\n| Per service | `Ava/Cost DailyCostUsd` by `category` | what AWS **billed** | ~3 days |\n| Runtime compute | AgentCore usage logs | vCPU/GB-hours a session held open | ~1 min |\n\n`ModelProduction` **is the same money as `CallCostUsd`** — our token estimate against the bill. Comparing them is `reconcile.py`; adding them double-counts. No cost tile fills a gap with zero: unpriced reads **No data**, never $0.00.",
         "region": "us-west-2"
       }
     },
     {
       "type": "metric",
       "x": 0,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -713,7 +713,7 @@
     {
       "type": "metric",
       "x": 4,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -740,7 +740,7 @@
     {
       "type": "metric",
       "x": 8,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -767,7 +767,7 @@
     {
       "type": "metric",
       "x": 12,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -816,7 +816,7 @@
     {
       "type": "metric",
       "x": 16,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -863,7 +863,7 @@
     {
       "type": "metric",
       "x": 20,
-      "y": 64,
+      "y": 58,
       "width": 4,
       "height": 4,
       "properties": {
@@ -890,11 +890,11 @@
     {
       "type": "metric",
       "x": 0,
-      "y": 68,
+      "y": 62,
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "Cost per call by day — unit economics",
+        "title": "Cost per call, by day",
         "view": "timeSeries",
         "stacked": false,
         "stat": "Average",
@@ -950,11 +950,11 @@
     {
       "type": "metric",
       "x": 12,
-      "y": 68,
+      "y": 62,
       "width": 12,
       "height": 6,
       "properties": {
-        "title": "Cost per call by outcome — a handed-off call is not priced like a contained one",
+        "title": "Cost per call by outcome",
         "view": "timeSeries",
         "stacked": false,
         "stat": "Sum",
@@ -1106,7 +1106,7 @@
     {
       "type": "metric",
       "x": 0,
-      "y": 74,
+      "y": 68,
       "width": 24,
       "height": 4,
       "properties": {
@@ -1234,11 +1234,11 @@
     {
       "type": "metric",
       "x": 0,
-      "y": 78,
+      "y": 72,
       "width": 24,
       "height": 7,
       "properties": {
-        "title": "AWS cost by service, daily (stacked) — plotted when learned, ~3 days after the spend",
+        "title": "AWS cost by service, daily (stacked) — plotted ~3 days after the spend",
         "view": "timeSeries",
         "stacked": true,
         "stat": "Maximum",
@@ -1448,24 +1448,24 @@
     {
       "type": "log",
       "x": 0,
-      "y": 85,
+      "y": 79,
       "width": 24,
       "height": 7,
       "properties": {
         "title": "Cost of each call — most recent first",
         "view": "table",
-        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| fields CallCostUsd*60/CallDurationSeconds as usd_per_min\n| fields @timestamp, call_id, outcome, escalated,\n         CallDurationSeconds as secs, CallCostUsd as usd, usd_per_min,\n         InputTokens as tok_in, OutputTokens as tok_out,\n         ToolCalls as tools, usage_mode, cost_priced\n| sort @timestamp desc\n| limit 50",
+        "query": "SOURCE '/aws/bedrock-agentcore/runtimes/ava_voice_agent-TVSWmk7feq-DEFAULT'\n| filter event = \"call.ledger\"\n| fields CallCostUsd*60/CallDurationSeconds as usd_per_min\n| fields @timestamp, call_id, session_id, outcome, escalated,\n         CallDurationSeconds as secs, CallCostUsd as usd, usd_per_min,\n         InputTokens as tok_in, OutputTokens as tok_out,\n         ToolCalls as tools, usage_mode, cost_priced\n| sort @timestamp desc\n| limit 50",
         "region": "us-west-2"
       }
     },
     {
       "type": "text",
       "x": 0,
-      "y": 92,
+      "y": 86,
       "width": 24,
-      "height": 4,
+      "height": 3,
       "properties": {
-        "markdown": "## Average quality score — not measured yet\n**There is no live quality score in this system, and nothing on this dashboard is a substitute for one.** The proxies above measure *discipline* — did grounding gates fire, did tools fail — not whether the call was any good.\n\nThe only quality apparatus that exists is `evals/golden/`: 40 hand-written cases graded by an LLM judge against a rubric. That is an **offline, pre-ship regression gate** for prompt edits — it scores a fixed set before deploy, not real calls after, and cannot fill this widget.\n\nA real score needs a judge reading production transcripts at teardown and publishing `QualityScore` through `emit_call_ledger`: per-call model cost, added teardown latency, and a sampling decision. That is a feature, not a widget.",
+        "markdown": "## Average quality score — not measured\nThere is no live quality score, and the proxies above are not one: they measure discipline (did gates fire, did tools fail), not whether the call was any good. `evals/golden/` is an offline pre-ship gate over 40 fixed cases and cannot score production calls. A real score needs a judge reading transcripts at teardown and publishing `QualityScore` through `emit_call_ledger` — per-call model cost, added latency, and a sampling decision. That is a feature, not a widget.",
         "region": "us-west-2"
       }
     }
