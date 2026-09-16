@@ -209,9 +209,15 @@ class Claim:
     tow_required: bool | None = None
     estimated_cost: str | None = None
     description: str = ""
+    # The call this claim was registered on. Every table written during a call
+    # carries the same value, which is what lets one query reconstruct a call
+    # across claims, escalations and the session row without a join table.
+    # Optional because a record written outside a call (a backfill, a Console
+    # test) genuinely has no session, and a blank string would read as one.
+    session_id: str | None = None
 
     def to_item(self) -> dict[str, Any]:
-        """Serialise to a DynamoDB item (omitting the two type-specific fields when unset)."""
+        """Serialise to a DynamoDB item (omitting the optional fields when unset)."""
         item: dict[str, Any] = {
             "claimRef": self.claim_ref,
             "policyId": self.policy_id,
@@ -228,6 +234,8 @@ class Claim:
             item["towRequired"] = self.tow_required
         if self.estimated_cost is not None:
             item["estimatedCost"] = self.estimated_cost
+        if self.session_id is not None:
+            item["sessionId"] = self.session_id
         return item
 
     @classmethod
@@ -246,6 +254,7 @@ class Claim:
             tow_required=item.get("towRequired"),
             estimated_cost=item.get("estimatedCost"),
             description=item.get("description", ""),
+            session_id=item.get("sessionId"),
         )
 
 
@@ -275,6 +284,10 @@ class EscalationRecord:
     ttl: int = 0  # epoch seconds -- DynamoDB TTL requires this, must stay a raw epoch int
     assigned_agent_id: str | None = None  # agent offered/claimed this row (Milestone F)
     claimed_at: str | None = None  # AU (Sydney-local) datetime; set by EscalationRepository.claim()
+    # The call this escalation was raised on — the same value the claims table
+    # and the session row carry, so a handoff can be traced back to everything
+    # else that happened on the call that produced it. See Claim.session_id.
+    session_id: str | None = None
 
     def to_item(self) -> dict[str, Any]:
         """Serialise to a DynamoDB item (omitting ``None`` optional fields)."""
@@ -303,6 +316,8 @@ class EscalationRecord:
             item["assignedAgentId"] = self.assigned_agent_id
         if self.claimed_at is not None:
             item["claimedAt"] = self.claimed_at
+        if self.session_id is not None:
+            item["sessionId"] = self.session_id
         return item
 
     @classmethod
@@ -325,6 +340,7 @@ class EscalationRecord:
             ttl=int(item.get("ttl", 0)),
             assigned_agent_id=item.get("assignedAgentId"),
             claimed_at=item.get("claimedAt"),
+            session_id=item.get("sessionId"),
         )
 
 

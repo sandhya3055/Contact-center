@@ -70,7 +70,11 @@ def check_duplicate_claim(config: AppConfig, vehicle_reg: str) -> bool:
 
 
 def create_claim_pending(
-    config: AppConfig, policy_id: str, slots: ClaimSlots, now_epoch: int
+    config: AppConfig,
+    policy_id: str,
+    slots: ClaimSlots,
+    now_epoch: int,
+    session_id: str | None = None,
 ) -> str:
     """Mint a ``CLM-<date>-<seq>`` token (D12) and write the claim as PENDING (rule #8).
 
@@ -82,6 +86,11 @@ def create_claim_pending(
             and the claim's ``created_at`` are deterministic and unit-testable.
             Formatted to an AU (Sydney-local) string (see ``epoch_to_au``) before being
             stored as ``created_at`` — the epoch int itself is never persisted.
+        session_id: The call this claim was registered on, stamped onto the row so
+            it can be traced back to the escalation and session rows from the same
+            call. Optional and defaulted: a caller outside a live call (a backfill,
+            a Console test) has no session, and inventing one would be worse than
+            recording none.
 
     Returns:
         The minted claim reference, read back to the caller as "logged" (rule #8) —
@@ -104,6 +113,7 @@ def create_claim_pending(
         tow_required=slots.tow_required,
         estimated_cost=slots.estimated_cost,
         description=slots.description,
+        session_id=session_id,
     )
     ClaimRepository(config).save_pending(claim)
     return claim_ref

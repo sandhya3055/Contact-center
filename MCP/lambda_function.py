@@ -81,6 +81,7 @@ from typing import Any
 
 from app.config import AppConfig, load_config
 from app.data.escalations import EscalationRepository
+from app.data.sessions import SessionRepository
 from app.data.models import (
     ClaimStatus,
     ClaimType,
@@ -358,7 +359,11 @@ def _register_claim(config: AppConfig, event: dict) -> dict:
         description=event.get("description", ""),
     )
     claim_ref = create_claim_pending(
-        config, event["policy_id"], slots, int(time.time())
+        config,
+        event["policy_id"],
+        slots,
+        int(time.time()),
+        session_id=event.get("session_id"),
     )
     return {"claim_ref": claim_ref}
 
@@ -383,6 +388,7 @@ def _escalate(config: AppConfig, event: dict) -> dict:
         transcript_tail=[event["note"]] if event.get("note") else [],
         channel="voice",
         ttl=now + config.escalation_ttl_seconds,
+        session_id=event.get("session_id"),
     )
     EscalationRepository(config).save(record)
     logger.warning(
@@ -399,6 +405,174 @@ _DISPATCH = {
     "register_claim": _register_claim,
     "escalate": _escalate,
 }
+
+
+# --- Pre-check --------------------------------------------------------------
+# Every field a tool cannot run without. Checked ahead of dispatch rather than
+# inside each tool for two reasons: a malformed call is refused before it can
+# do half its work (register_claim's duplicate check used to run against a
+# vehicle_reg before anything had established the rest of the call was sound),
+# and the error names *every* missing field at once instead of whichever one
+# the tool body happened to touch first — the model gets one round trip to fix
+# the call rather than one per field.
+#
+# Derived from what each tool actually subscripts, not from the Gateway's
+# declared schema: the schema is what the model is told, this is what the code
+# requires, and the point of the check is to catch the two drifting apart.
+#
+# `escalate` is deliberately absent. Its `reason` has a documented default
+# ("caller_requested") and a handoff must never fail because a model omitted a
+# field — a caller asking for a person gets one either way.
+_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "get_policy": ("number", "dob", "full_name"),
+    "verify_dob": ("number", "dob"),
+    "register_claim": (
+        "policy_id",
+        "vehicle_reg",
+        "claim_type",
+        "incident_date",
+        "incident_location",
+        "description"
+    ),
+}
+
+
+# What a model sends for a field it has not collected yet. A JSON `null` is
+# only the most obvious form: asked for a string, a model that has nothing to
+# put there will as readily send "null", "N/A", "unknown", or the schema's own
+# type name back as a literal. All of them mean the same thing — no value — and
+# all of them would otherwise be matched against stored data as if they were
+# one, turning "I never asked the caller" into "no policy found".
+#
+# Matched case-insensitively against the stripped value, after punctuation that
+# carries no meaning on its own is discarded.
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "null",
+        "none",
+        "nil",
+        "nan",
+        "undefined",
+        "unknown",
+        "n/a",
+        "na",
+        "not provided",
+        "not given",
+        "not available",
+        "not applicable",
+        "notprovided",
+        "missing",
+        "empty",
+        "blank",
+        "tbd",
+        "tba",
+        "pending",
+        "string",
+        "value",
+        "placeholder",
+        "example",
+        "xxx",
+        "xxxx",
+        "test",
+    }
+)
+
+# Punctuation-only answers ("-", "?", "--") mean the same thing and are not
+# worth enumerating individually.
+_PUNCTUATION_ONLY = frozenset("-_.?*/\\ ")
+
+
+def _is_blank(value: Any) -> bool:
+    """Whether a supplied field carries no real value.
+
+    Four shapes, all meaning "not collected": absent or ``null``; a string of
+    nothing but whitespace; an empty collection; and a placeholder a model
+    substitutes for a value it does not have — a literal ``"null"``, ``"N/A"``,
+    ``"unknown"``, the schema's own type name, or punctuation on its own.
+
+    Deliberately **not** falsiness: ``0`` and ``False`` are real answers, and
+    ``tow_required: false`` must never be read as a missing field.
+
+    The placeholder list is a floor, not a guarantee — it cannot catch an
+    invented value that merely looks real, which is what the per-field
+    validators (``_validate_number``, ``_validate_dob``) and the agent-side
+    grounding gate are for.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return True
+        if all(character in _PUNCTUATION_ONLY for character in stripped):
+            return True
+        return stripped.casefold() in _PLACEHOLDER_VALUES
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    return False
+
+
+def _precheck(tool: str, event: dict) -> None:
+    """Refuse a call whose required fields are missing or empty.
+
+    Raises:
+        ValueError: naming every field that is absent or carries no value.
+    """
+    missing = [
+        field for field in _REQUIRED_FIELDS.get(tool, ()) if _is_blank(event.get(field))
+    ]
+    if missing:
+        raise ValueError(f"missing or empty required field(s): {', '.join(missing)}")
+
+
+# --- Post-check -------------------------------------------------------------
+# Every tool's result carries the same `checks` block: which tools have run on
+# this call so far, this one included. It is what lets the agent answer from
+# what actually happened rather than from what it believes happened — the model
+# cannot decide it already looked a policy up when it did not.
+#
+# Keyed by tool name, valued by the flag each one sets.
+_CHECK_FLAGS = {
+    "get_policy": "isGetPolicyCalled",
+    "verify_dob": "isVerifyDobCalled",
+    "register_claim": "isRegisterClaimCalled",
+    "escalate": "isEscalateCalled",
+}
+
+
+def _postcheck(config: AppConfig, tool: str, event: dict, result: dict) -> dict:
+    """Attach this call's tool-call flags to a result that already succeeded.
+
+    Never raises. The tool has done its work by the time this runs — a claim is
+    registered, an escalation is queued — and failing the call now would report
+    that work as not having happened, which is the one outcome worse than
+    flags that are merely incomplete. A bookkeeping failure degrades to "only
+    this tool ran", logged, and the result still goes back.
+    """
+    session_id = event.get("session_id")
+    called = {tool}
+    if session_id:
+        try:
+            called = SessionRepository(config).record_tool(str(session_id), tool)
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            logger.warning(
+                "tool-check bookkeeping failed",
+                extra={
+                    "fields": {
+                        "event_name": "tool.checks_unavailable",
+                        "reason": str(exc),
+                    }
+                },
+            )
+    else:
+        # No session id: a Console test call, or a tool whose declared schema
+        # doesn't carry one. The flags still go back, scoped to this call
+        # alone, so the response shape never depends on how it was invoked.
+        logger.info(
+            "no session id; tool checks are this call only",
+            extra={"fields": {"event_name": "tool.checks_unscoped"}},
+        )
+    return {**result, "checks": {flag: name in called for name, flag in _CHECK_FLAGS.items()}}
 
 
 def lambda_handler(event: dict, context: Any) -> dict:
@@ -438,14 +612,19 @@ def lambda_handler(event: dict, context: Any) -> dict:
     if handler is None:
         logger.warning("unknown tool requested", extra={"fields": {"event_name": "tool.unknown"}})
         raise ToolError(f"unknown tool: {tool}")
+    config = load_config()
     try:
-        result = handler(load_config(), event)
+        _precheck(tool, event)
+        result = handler(config, event)
     except (KeyError, ValueError) as exc:
         logger.warning(
             "rejected invalid input",
             extra={"fields": {"event_name": "tool.invalid_input", "reason": str(exc)}},
         )
         raise ToolError(f"{tool}: invalid input: {exc}") from exc
+    # After the handler, never around it: the flags describe tools that *ran*,
+    # so a call rejected above must not leave one set.
+    result = _postcheck(config, tool, event, result)
     logger.info(
         "tool ok",
         extra={
