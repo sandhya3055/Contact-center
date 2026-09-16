@@ -469,3 +469,23 @@ class OtpChallenge:
             created_at=str(item.get("createdAt", "")),
             ttl=int(item.get("ttl", 0)),
         )
+
+
+@dataclass(frozen=True)
+class KnowledgeBasePassage:
+    """One passage returned by a Bedrock Knowledge Base's ``Retrieve`` API.
+
+    Not a DynamoDB item like the records above -- nothing here is written to a
+    table, so there's no ``to_item``/``from_item`` pair.
+
+    Attributes:
+        text: The retrieved chunk's text content.
+        score: The vector-search relevance score for this chunk (higher is more
+            relevant). Range depends on the Knowledge Base's embedding model.
+        source_uri: Where the chunk came from (S3 object or web URL), when the
+            Knowledge Base's data source reports one.
+    """
+
+    text: str
+    score: float
+    source_uri: str | None = None

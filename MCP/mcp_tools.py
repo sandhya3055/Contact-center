@@ -8,7 +8,7 @@ event itself is the tool's raw input). Mirrors the existing single-Lambda patter
 feature (which has no way to set ``client_context``) can invoke a specific tool
 directly -- see ``_tool_name``.
 
-Four tools, deliberately scoped down from the full BUILD_SPEC §8 tool set (Opus
+Five tools, deliberately scoped down from the full BUILD_SPEC §8 tool set (Opus
 review, D103):
 
   - ``get_policy``: read-only, wraps ``lookup_policy_by_identity``. Requires all
@@ -59,6 +59,17 @@ review, D103):
     stored as a free string (not validated against ``HandoffReason``) and always
     queued at the lowest priority bucket -- see ``_QUEUE_PRIORITY`` below for why
     ``app.flow.state``/``app.escalation.priority`` are deliberately not imported.
+  - ``search_knowledge_base``: read-only, wraps ``search_knowledge_base`` (the
+    ``app.tools`` function of the same name) over a Bedrock Knowledge Base
+    (``KNOWLEDGE_BASE_ID``/``KB_REGION``). Returns raw passages + scores, never a
+    generated answer -- Ava composes the spoken response herself from real
+    grounding text, the same "tools return facts, the model phrases them" split
+    every other tool above follows. Passages below ``KB_MIN_SCORE`` are dropped
+    before Ava ever sees them, so a weak vector-search hit can't be mistaken for
+    a real answer. Covers general/FAQ/procedural content that was never a
+    candidate for a structured field in the first place -- see
+    ``app/tools/knowledge_base_tools.py`` for why this doesn't reopen the
+    "structured DB only" decision in ``app/data/models.py``.
 
 >>> UNVERIFIED CONTRACT <<<
 The Gateway Lambda-target invocation shape above (custom field name, ``___``
@@ -95,6 +106,7 @@ from app.tools.claim_tools import (
     create_claim_pending,
     list_claims_for_vehicle,
 )
+from app.tools.knowledge_base_tools import search_knowledge_base
 from app.tools.policy_tools import (
     lookup_policy_by_identity,
     lookup_policy_by_number,
@@ -250,6 +262,20 @@ def _validate_full_name(full_name: Any) -> str | None:
     return full_name.strip() or None
 
 
+def _validate_query(query: Any) -> str:
+    """Validate the untrusted ``query`` field; raise ``ValueError`` if blank or oversized.
+
+    The length cap isn't a real user need -- it's a guard against a malformed
+    or abusive call turning into an oversized/expensive vector search.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("invalid query")
+    query = query.strip()
+    if len(query) > 1000:
+        raise ValueError("invalid query")
+    return query
+
+
 def _require_full_name(full_name: Any) -> str:
     """Validate a ``full_name`` that the tool cannot proceed without.
 
@@ -286,6 +312,11 @@ def _claim_view(claim: Any) -> dict:
     """Whitelist a :class:`Claim` down to fields safe for an external MCP client."""
     full = asdict(claim)
     return {field: full[field] for field in _CLAIM_FIELDS}
+
+
+def _passage_view(passage: Any) -> dict:
+    """Shape a :class:`KnowledgeBasePassage` for an external MCP client."""
+    return {"text": passage.text, "score": passage.score, "source": passage.source_uri}
 
 
 def _get_policy(config: AppConfig, event: dict) -> dict:
@@ -393,11 +424,31 @@ def _escalate(config: AppConfig, event: dict) -> dict:
     return {"escalation_id": record.escalation_id, "status": "queued"}
 
 
+def _search_knowledge_base(config: AppConfig, event: dict) -> dict:
+    """Search the configured Knowledge Base and return the matching passages.
+
+    Returns passages only -- never a generated answer -- so Ava composes the
+    spoken response herself from real grounding text, same as every other tool
+    above returns facts rather than pre-written phrasing. An empty result
+    (``found: false``) is itself a valid answer: it tells Ava nothing relevant
+    was found, rather than handing her a rewritten answer that might not fit
+    the question actually asked.
+    """
+    query = _validate_query(event.get("query"))
+    max_results = int(event.get("max_results") or config.kb_max_results)
+    result = search_knowledge_base(config, query, max_results, config.kb_min_score)
+    return {
+        "found": result.found,
+        "passages": [_passage_view(p) for p in result.passages],
+    }
+
+
 _DISPATCH = {
     "get_policy": _get_policy,
     "verify_dob": _verify_dob,
     "register_claim": _register_claim,
     "escalate": _escalate,
+    "search_knowledge_base": _search_knowledge_base,
 }
 
 
