@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nexora — Insurance support, answered on the first ring</title>
+<title>INSUVOX — Insurance support, answered on the first ring</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -539,7 +539,7 @@
   <div class="wrap nav-inner">
     <a class="brand" href="#top">
       <span class="brand-mark">A</span>
-      <span class="brand-name">Nexora</span>
+      <span class="brand-name">INSUVOX</span>
     </a>
     <div class="nav-links">
       <a href="#services">Support</a>
@@ -734,7 +734,7 @@
       <div>
         <a class="brand" href="#top">
           <span class="brand-mark">A</span>
-          <span class="brand-name">Nexora</span>
+          <span class="brand-name">INSUVOX</span>
         </a>
         <p style="margin-top:10px;font-size:13.5px;color:var(--text-muted);max-width:34ch">
           Motor and health cover, with support that picks up.
@@ -748,7 +748,7 @@
       </div>
     </div>
     <div class="foot-legal">
-      <span>Demo environment — Nexora is a fictional brand and the policy and claim data behind this page is sample data.</span>
+      <span>Demo environment — INSUVOX is a fictional brand and the policy and claim data behind this page is sample data.</span>
       <span>Ava is an AI assistant, not a licensed advisor.</span>
     </div>
   </div>
@@ -764,7 +764,7 @@
 <div class="overlay" id="overlay" hidden role="dialog" aria-modal="true" aria-labelledby="callboxTitle">
   <div class="callbox">
     <div class="callbox-head">
-      <span class="title" id="callboxTitle">Nexora customer care</span>
+      <span class="title" id="callboxTitle">INSUVOX customer care</span>
       <button class="icon-btn" id="closeBtn" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
@@ -778,7 +778,7 @@
           <span class="orb">A</span>
         </div>
         <p class="agent-name" id="agentName">Ava</p>
-        <p class="agent-role" id="agentRole">AI Voice Assistant · Nexora</p>
+        <p class="agent-role" id="agentRole">AI Voice Assistant · INSUVOX</p>
 
         <div class="status-row">
           <span id="status" class="status idle">Not connected</span>
@@ -1368,7 +1368,7 @@ function applyHandoff(event) {
     if (event.ai_available === false) {
       addSystemLine('The specialist has left the call. Connecting you to someone '
         + 'else — stay on the line.');
-      agentNameEl.textContent = 'Nexora';
+      agentNameEl.textContent = 'INSUVOX';
       agentRoleEl.textContent = 'Waiting for a specialist';
     } else {
       addSystemLine('Connecting you to a specialist — stay on the line.');
@@ -1378,7 +1378,7 @@ function applyHandoff(event) {
   if (state === 'human') {
     const name = (event.agent_name || 'a specialist').trim();
     agentNameEl.textContent = name;
-    agentRoleEl.textContent = 'Customer care specialist · Nexora';
+    agentRoleEl.textContent = 'Customer care specialist · INSUVOX';
     setStatus('connected', 'On call');
     addSystemLine(`${name} has joined the call.`);
     // Ava's session ends when a person takes the call, so this is the whole
@@ -1392,7 +1392,7 @@ function applyHandoff(event) {
   }
   if (state === 'ai') {
     agentNameEl.textContent = 'Ava';
-    agentRoleEl.textContent = 'AI Voice Assistant · Nexora';
+    agentRoleEl.textContent = 'AI Voice Assistant · INSUVOX';
     setStatus('connected', 'On call');
     addSystemLine('You’re back with Ava.');
   }
@@ -1559,7 +1559,7 @@ async function start() {
       setCallUiState(false);
       // Back to Ava for the next call, however this one ended.
       agentNameEl.textContent = 'Ava';
-      agentRoleEl.textContent = 'AI Voice Assistant · Nexora';
+      agentRoleEl.textContent = 'AI Voice Assistant · INSUVOX';
       connectBtn.disabled = false;
       activeStreamBubbles.user = activeStreamBubbles.assistant = null;
     };
