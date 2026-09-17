@@ -79,8 +79,16 @@ class KnowledgeBaseRepository:
         response = client.retrieve(
             knowledgeBaseId=self._config.require_knowledge_base_id(),
             retrievalQuery={"text": query},
+            # `managedSearchConfiguration`, not `vectorSearchConfiguration`:
+            # the configured knowledge base is a MANAGED one (its
+            # `knowledgeBaseConfiguration.type`), and a managed base rejects the
+            # vector shape outright -- "Incompatible configuration:
+            # vectorSearchConfiguration is not supported for managed knowledge
+            # bases", a ValidationException on every call, not a degraded
+            # result. The two are mutually exclusive, so a base rebuilt as a
+            # customer-managed vector store needs this key swapped back.
             retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": max_results}
+                "managedSearchConfiguration": {"numberOfResults": max_results}
             },
         )
         return [

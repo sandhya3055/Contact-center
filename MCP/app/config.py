@@ -311,9 +311,18 @@ class AppConfig:
             given resource may be provisioned in a specific region.
         kb_max_results: Default cap on passages requested from the vector search
             when the tool call doesn't specify `max_results` itself.
-        kb_min_score: Minimum vector-search relevance score a passage must clear
-            to be returned. Tune against the knowledge base's own embedding
-            model — there is no universal threshold across models.
+        kb_min_score: Minimum search score a passage must clear to be returned.
+            A noise floor, *not* a relevance gate: measured against this
+            knowledge base, on-topic and off-topic scores overlap so heavily
+            that no threshold separates them ("is a courtesy car included"
+            tops out at 0.55, while "who won the world cup in 1998" reaches
+            0.74 against the same insurance document). 0.6 -- the value this
+            started at -- returned nothing for genuine questions. So this only
+            trims the weakest tail of a result list, and what actually stops an
+            irrelevant passage being spoken as an answer is the tool's own
+            declared contract: passages may not answer the question, and the
+            model is told to say so rather than compose from them. Re-measure
+            after any change to the knowledge base or its search mode.
     """
 
     transport: str
@@ -566,5 +575,5 @@ def load_config() -> AppConfig:
         knowledge_base_id=_get("KNOWLEDGE_BASE_ID", "GT2Q6SH5AH"),
         kb_region=_get("KB_REGION", _get("AWS_REGION", "us-west-2")),
         kb_max_results=_get_int("KB_MAX_RESULTS", 5),
-        kb_min_score=_get_float("KB_MIN_SCORE", 0.6),
+        kb_min_score=_get_float("KB_MIN_SCORE", 0.4),
     )

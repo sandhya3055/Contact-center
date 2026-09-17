@@ -485,6 +485,13 @@ _REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "incident_location",
         "description"
     ),
+    # `_validate_query` already refuses a blank or oversized query, but not a
+    # placeholder one: "unknown" is a perfectly valid string and would go
+    # straight to a real vector search, coming back with whatever the index
+    # happens to put nearest to the word. Listed here so a query the model
+    # never actually collected is refused the same way a missing policy number
+    # is, rather than answered from noise.
+    "search_knowledge_base": ("query",),
 }
 
 
