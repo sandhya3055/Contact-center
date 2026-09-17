@@ -76,20 +76,27 @@ class KnowledgeBaseRepository:
     def retrieve(self, query: str, max_results: int) -> list[KnowledgeBasePassage]:
         """Return up to ``max_results`` passages for ``query``, best score first."""
         client = get_bedrock_agent_client(self._config)
+        # No `retrievalConfiguration` at all, deliberately -- it is an optional
+        # field and every way of filling it in is worse here.
+        #
+        # This knowledge base is a MANAGED one (`knowledgeBaseConfiguration.type`),
+        # so the only shape the service accepts is `managedSearchConfiguration`:
+        # `vectorSearchConfiguration` is refused server-side ("Incompatible
+        # configuration: vectorSearchConfiguration is not supported for managed
+        # knowledge bases"). But `managedSearchConfiguration` only exists in the
+        # botocore service model from 1.43.32 onward, and the Lambda runtime's
+        # built-in botocore is older than that, so sending it fails *client-side*
+        # validation before any request leaves the process. Carrying a newer
+        # botocore in the deployment zip to gain one field costs ~16MB.
+        #
+        # Omitting the field sidesteps the version split entirely and works on
+        # every botocore: the service applies its own default page size (5
+        # today), and `max_results` is applied below instead. The tradeoff is
+        # that `max_results` is a cap rather than a request -- asking for more
+        # than the service default still returns the service default.
         response = client.retrieve(
             knowledgeBaseId=self._config.require_knowledge_base_id(),
             retrievalQuery={"text": query},
-            # `managedSearchConfiguration`, not `vectorSearchConfiguration`:
-            # the configured knowledge base is a MANAGED one (its
-            # `knowledgeBaseConfiguration.type`), and a managed base rejects the
-            # vector shape outright -- "Incompatible configuration:
-            # vectorSearchConfiguration is not supported for managed knowledge
-            # bases", a ValidationException on every call, not a degraded
-            # result. The two are mutually exclusive, so a base rebuilt as a
-            # customer-managed vector store needs this key swapped back.
-            retrievalConfiguration={
-                "managedSearchConfiguration": {"numberOfResults": max_results}
-            },
         )
         return [
             KnowledgeBasePassage(
@@ -97,5 +104,5 @@ class KnowledgeBaseRepository:
                 score=float(result.get("score", 0.0)),
                 source_uri=_source_uri(result),
             )
-            for result in response.get("retrievalResults", [])
+            for result in response.get("retrievalResults", [])[:max_results]
         ]
