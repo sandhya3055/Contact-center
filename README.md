@@ -225,7 +225,7 @@ With the pre-call details entered, Ava's first action on a call isn't speech —
 the gateway's policy lookup for that number. Only once the result is back does
 she speak, opening with the caller's first name from the policy and
 introducing herself in the same breath ("Hello Priya, I'm Ava, your AI
-Assistant. I can help with…"), then handling whatever they need.
+Assistant. I can look at your policy…"), then handling whatever they need.
 
 Two details worth knowing if you change this:
 

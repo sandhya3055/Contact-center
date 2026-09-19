@@ -43,7 +43,7 @@ Branch verbs: **Continue** → next state · **Escalate** → `S-90` · **Loop**
 
 **[PROMPT] Verbatim:**
 
-> "Hi, I'm Ava, your AI Assistant. I can help you with your policy details, register a claim, or connect you with a human agent. First, could I get your mobile number?"
+> "Hi, I'm Ava, your AI Assistant. I can look at your policy, answer general questions, register a claim, or connect you with a human agent. First, could I get your mobile number?"
 
 Voice constraints, global for the whole call **[PROMPT]**:
 - One to two sentences per turn. No lists, headings, or unspeakable symbols.

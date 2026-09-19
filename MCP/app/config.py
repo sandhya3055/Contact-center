@@ -302,6 +302,27 @@ class AppConfig:
             what to say and which tool to call next from its own instructions,
             rather than a graph deciding for it). `langgraph` is the rollback
             target: flipping this back is an env var, not a redeploy.
+        knowledge_base_id: Bedrock Knowledge Base id the `search_knowledge_base`
+            MCP tool queries (see `app/data/knowledge_base.py`). Blank raises
+            `ConfigError` only when that tool is actually called (`require_
+            knowledge_base_id`) — every other tool keeps working without it.
+        kb_region: AWS region the knowledge base lives in. Defaults to
+            `aws_region`; separate for the same reason `bedrock_region` is — a
+            given resource may be provisioned in a specific region.
+        kb_max_results: Default cap on passages requested from the vector search
+            when the tool call doesn't specify `max_results` itself.
+        kb_min_score: Minimum search score a passage must clear to be returned.
+            A noise floor, *not* a relevance gate: measured against this
+            knowledge base, on-topic and off-topic scores overlap so heavily
+            that no threshold separates them ("is a courtesy car included"
+            tops out at 0.55, while "who won the world cup in 1998" reaches
+            0.74 against the same insurance document). 0.6 -- the value this
+            started at -- returned nothing for genuine questions. So this only
+            trims the weakest tail of a result list, and what actually stops an
+            irrelevant passage being spoken as an answer is the tool's own
+            declared contract: passages may not answer the question, and the
+            model is told to say so rather than compose from them. Re-measure
+            after any change to the knowledge base or its search mode.
     """
 
     transport: str
@@ -392,6 +413,10 @@ class AppConfig:
     memory_semantic_strategy_id: str
     memory_preference_strategy_id: str
     agent_framework: str
+    knowledge_base_id: str
+    kb_region: str
+    kb_max_results: int
+    kb_min_score: float
 
     def require_openai_api_key(self) -> str:
         """Return the OpenAI key or raise if it is not configured.
@@ -414,6 +439,12 @@ class AppConfig:
         if not self.notify_sender_email:
             raise ConfigError("NOTIFY_SENDER_EMAIL is not set.")
         return self.notify_sender_email
+
+    def require_knowledge_base_id(self) -> str:
+        """Return the Knowledge Base id or raise if it is not configured."""
+        if not self.knowledge_base_id:
+            raise ConfigError("KNOWLEDGE_BASE_ID is not set.")
+        return self.knowledge_base_id
 
 
 def load_config() -> AppConfig:
@@ -541,4 +572,8 @@ def load_config() -> AppConfig:
         memory_semantic_strategy_id=_get("MEMORY_SEMANTIC_STRATEGY_ID", ""),
         memory_preference_strategy_id=_get("MEMORY_PREFERENCE_STRATEGY_ID", ""),
         agent_framework=_get("AGENT_FRAMEWORK", "langgraph"),
+        knowledge_base_id=_get("KNOWLEDGE_BASE_ID", "GT2Q6SH5AH"),
+        kb_region=_get("KB_REGION", _get("AWS_REGION", "us-west-2")),
+        kb_max_results=_get_int("KB_MAX_RESULTS", 5),
+        kb_min_score=_get_float("KB_MIN_SCORE", 0.4),
     )
