@@ -1,0 +1,34 @@
+# Pinned to the exact set resolved into image v12, the version running on
+# AgentCore Runtime. Two builds of the same commit should produce the same
+# container: this agent's behaviour depends on how strands-agents drives tool
+# execution and Nova Sonic, so an unpinned resolve can change how a live call
+# behaves with no change here. Bump deliberately, then redeploy and retest.
+strands-agents[bidi-all]==1.54.0   # Bidirectional voice agent framework (BidiAgent + Nova Sonic)
+mcp-proxy-for-aws==1.6.4    # aws_iam_streamablehttp_client — signs gateway MCP requests with SigV4
+fastapi==0.141.1            # Web framework
+uvicorn[standard]==0.52.4   # ASGI server (includes websockets)
+boto3==1.43.50              # bedrock-agent client (optional Bedrock Prompt fetch); also the
+                            # dynamodb + bedrock-agentcore clients portal_context.py reads with
+bedrock-agentcore[strands-agents]==1.21.0  # AgentCoreMemorySessionManager — session (short-term) +
+                            # long-term caller memory. Only imported when MEMORY_ID is set; the call
+                            # runs without it otherwise (see build_memory_session_manager).
+aws-opentelemetry-distro==0.19.0  # the ADOT distro behind `opentelemetry-instrument` (see the
+                            # Dockerfile CMD). Brings the auto-instrumentation the wrapper activates —
+                            # FastAPI, botocore, urllib3 — so a trace carries the request and the AWS
+                            # calls, not just the spans Strands emits for itself.
+                            # This release pins its whole dependency set exactly, and two of those
+                            # pins are why the lock below moved: protobuf==6.33.5 (was 7.36.1) and
+                            # cachetools==6.2.4 (was 7.1.8). Both are downgrades, and both are safe
+                            # against the rest of the graph — every protobuf requirer here accepts
+                            # >=6.33.5,<8.0.0, and py-key-value-aio is the only thing that wants
+                            # cachetools at all (>=5.0.0). Installing 0.19.0 without moving them is
+                            # ResolutionImpossible, so this and the lock have to change together.
+                            # It also pins api/sdk 1.44.0 and the instrumentation 0.65b0, which is
+                            # what the lock already held. An older distro (0.13.0) instead drags
+                            # opentelemetry-proto back to a release whose protobuf range has no
+                            # candidate here, and the resolve fails outright rather than degrading.
+python-dotenv==1.2.3        # loads ../.env for local dev only (no-op in the deployed container)
+pyaudio==0.2.14             # Audio I/O (required by BidiAgent even though this container has no mic/speakers).
+                            # Pinned: 0.2.14 is the version already verified to build cleanly (used by
+                            # bot.py's own venv); an unpinned resolve can land on the older 0.2.13, which
+                            # has no prebuilt wheel for some platforms and fails the source build above.

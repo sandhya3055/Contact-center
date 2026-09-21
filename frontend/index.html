@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>INSUVOX — Insurance support, answered on the first ring</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7fb;
+    --bg-tint: #eceffa;
+    --surface: #ffffff;
+    --surface-alt: #f3f5fa;
+    --border: #e3e6ef;
+    --border-strong: #d2d7e5;
+    --text: #10131c;
+    --text-muted: #5b6376;
+    --text-faint: #8b93a7;
+    --brand: #1b3bd6;
+    /* --brand is the *text/accent* blue; --brand-solid is the blue used as a
+       fill behind white text. They diverge in dark mode, where the accent has
+       to lighten to stay readable on a dark ground but a fill must stay dark
+       enough for white text to clear 4.5:1. */
+    --brand-solid: #1b3bd6;
+    --brand-hover: #1630b0;
+    --brand-soft: #1b3bd614;
+    --ring: #1b3bd633;
+    --accent: #0d9488;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --success: #16a34a;
+    --success-hover: #128a3e;
+    --warning: #b45309;
+    --ink: #0c1024;
+    --ink-text: #f5f7fd;
+    --ink-muted: #98a2c4;
+    --shadow-sm: 0 1px 2px rgba(14, 18, 33, 0.05), 0 1px 10px rgba(14, 18, 33, 0.04);
+    --shadow-lg: 0 18px 50px -12px rgba(14, 18, 33, 0.28);
+    --radius: 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0c13;
+      --bg-tint: #11141f;
+      --surface: #14171f;
+      --surface-alt: #1b1f2a;
+      --border: #262a37;
+      --border-strong: #333949;
+      --text: #eceef5;
+      --text-muted: #a0a7ba;
+      --text-faint: #737b90;
+      --brand: #5b7dff;
+      --brand-solid: #3352d9;
+      --brand-hover: #4a6ae0;
+      --brand-soft: #5b7dff1f;
+      --ring: #5b7dff4d;
+      --accent: #2dd4bf;
+      --ink: #080a12;
+      --ink-text: #f5f7fd;
+      --ink-muted: #848da8;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.4), 0 1px 10px rgba(0,0,0,0.3);
+      --shadow-lg: 0 18px 50px -12px rgba(0,0,0,0.7);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  /* Author rules below set display on several of the elements toggled with the
+     `hidden` attribute (.status, .muted-badge, .controls, …), which would beat
+     the UA's [hidden] rule on specificity alone — so state it here with force. */
+  [hidden] { display: none !important; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { margin: 0; line-height: 1.15; letter-spacing: -0.02em; }
+  p { margin: 0; }
+  a { color: inherit; }
+  img, svg { max-width: 100%; }
+
+  .wrap { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------------- top nav ---------------- */
+  .site-nav {
+    position: sticky; top: 0; z-index: 40;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: saturate(180%) blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner { display: flex; align-items: center; gap: 28px; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; flex-shrink: 0; }
+  .brand-mark {
+    width: 32px; height: 32px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--brand), #7c3aed);
+    display: grid; place-items: center;
+    color: #fff; font-weight: 800; font-size: 15px;
+  }
+  .brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .nav-links { display: flex; gap: 24px; margin-left: 8px; }
+  .nav-links a {
+    font-size: 14px; font-weight: 500; color: var(--text-muted);
+    text-decoration: none; transition: color 0.15s;
+  }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .nav-hint { font-size: 13px; color: var(--text-faint); }
+  @media (max-width: 860px) { .nav-links, .nav-hint { display: none; } }
+
+  /* ---------------- buttons ---------------- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font: inherit; font-size: 14px; font-weight: 600;
+    padding: 10px 18px; border-radius: 10px;
+    border: 1px solid transparent; cursor: pointer;
+    text-decoration: none; white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.05s;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+  .btn--primary { background: var(--brand-solid); color: #fff; }
+  .btn--primary:hover { background: var(--brand-hover); }
+  .btn--ghost { background: transparent; color: var(--text); border-color: var(--border-strong); }
+  .btn--ghost:hover { background: var(--surface-alt); }
+  .btn--lg { font-size: 15px; padding: 13px 24px; border-radius: 12px; }
+  .btn svg { width: 17px; height: 17px; }
+
+  /* ---------------- hero ---------------- */
+  .hero {
+    background: linear-gradient(180deg, var(--bg-tint), var(--bg) 78%);
+    border-bottom: 1px solid var(--border);
+    padding: 72px 0 76px;
+  }
+  .hero-grid {
+    display: grid; grid-template-columns: 1.05fr 0.95fr;
+    gap: 56px; align-items: center;
+  }
+  @media (max-width: 940px) { .hero { padding: 48px 0 56px; } .hero-grid { grid-template-columns: 1fr; gap: 40px; } }
+
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: 0.01em;
+    color: var(--brand); background: var(--brand-soft);
+    border: 1px solid var(--ring);
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 20px;
+  }
+  .eyebrow .live-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent);
+  }
+  .hero h1 { font-size: clamp(34px, 5vw, 50px); font-weight: 700; }
+  .hero .lede { margin-top: 18px; font-size: 17px; color: var(--text-muted); max-width: 46ch; }
+  .hero-actions { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .hero-note { margin-top: 18px; font-size: 13px; color: var(--text-faint); }
+
+  /* hero call card */
+  .call-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    box-shadow: var(--shadow-lg);
+    padding: 30px 28px 26px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .call-card::before {
+    content: ''; position: absolute; inset: 0 0 auto; height: 3px;
+    background: linear-gradient(90deg, var(--brand), #7c3aed, var(--accent));
+  }
+  .call-card .who { font-size: 13px; font-weight: 600; color: var(--text-faint); letter-spacing: 0.04em; text-transform: uppercase; }
+  .call-card h3 { margin-top: 10px; font-size: 21px; font-weight: 700; }
+  .call-card .desc { margin-top: 8px; font-size: 14px; color: var(--text-muted); }
+  .dial-btn {
+    margin: 24px auto 0;
+    width: 108px; height: 108px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: var(--success); color: #fff;
+    display: grid; place-items: center;
+    box-shadow: 0 10px 28px -8px color-mix(in srgb, var(--success) 70%, transparent);
+    transition: background 0.15s, transform 0.08s;
+    position: relative;
+  }
+  .dial-btn svg { width: 40px; height: 40px; }
+  .dial-btn:hover { background: var(--success-hover); }
+  .dial-btn:active { transform: scale(0.96); }
+  .dial-btn:focus-visible { outline: none; box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 35%, transparent); }
+  .dial-btn::after {
+    content: ''; position: absolute; inset: -10px; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--success) 40%, transparent);
+    animation: halo 2.4s ease-out infinite;
+  }
+  @keyframes halo {
+    0% { transform: scale(0.9); opacity: 0.9; }
+    70% { transform: scale(1.25); opacity: 0; }
+    100% { opacity: 0; }
+  }
+  .dial-label { margin-top: 16px; font-size: 15px; font-weight: 600; }
+  .dial-sub { margin-top: 4px; font-size: 13px; color: var(--text-faint); }
+  .call-card .card-foot {
+    margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border);
+    display: flex; justify-content: center; gap: 18px;
+    font-size: 12.5px; color: var(--text-faint);
+  }
+  .call-card .card-foot span { display: inline-flex; align-items: center; gap: 5px; }
+
+  /* ---------------- stat strip ---------------- */
+  .stats { border-bottom: 1px solid var(--border); background: var(--surface); }
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 1px; background: var(--border);
+  }
+  .stat { background: var(--surface); padding: 26px 24px; }
+  .stat .val { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+  .stat .key { margin-top: 4px; font-size: 13px; color: var(--text-muted); }
+  @media (max-width: 780px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+
+  /* ---------------- generic section ---------------- */
+  section.band { padding: 76px 0; }
+  @media (max-width: 940px) { section.band { padding: 52px 0; } }
+  .band-head { max-width: 60ch; margin-bottom: 36px; }
+  .band-head .kicker {
+    font-size: 12.5px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--brand); margin-bottom: 12px;
+  }
+  .band-head h2 { font-size: clamp(25px, 3.4vw, 33px); font-weight: 700; }
+  .band-head p { margin-top: 12px; font-size: 16px; color: var(--text-muted); }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 26px 24px;
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+  .card .icon {
+    width: 40px; height: 40px; border-radius: 11px;
+    display: grid; place-items: center; margin-bottom: 16px;
+    background: var(--brand-soft); color: var(--brand);
+  }
+  .card .icon svg { width: 20px; height: 20px; }
+  .card h3 { font-size: 16.5px; font-weight: 650; }
+  .card p { margin-top: 8px; font-size: 14px; color: var(--text-muted); }
+  .card ul { margin: 14px 0 0; padding: 0; list-style: none; }
+  .card li {
+    font-size: 13.5px; color: var(--text-muted);
+    padding-left: 20px; position: relative; margin-top: 7px;
+  }
+  .card li::before {
+    content: ''; position: absolute; left: 4px; top: 8px;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+  }
+
+  /* ---------------- how it works ---------------- */
+  .steps-band { background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; counter-reset: step; }
+  @media (max-width: 900px) { .steps { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .steps { grid-template-columns: 1fr; } }
+  .step { position: relative; padding-top: 42px; }
+  .step::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; top: 0; left: 0;
+    width: 30px; height: 30px; border-radius: 9px;
+    display: grid; place-items: center;
+    background: var(--ink); color: var(--ink-text);
+    font-size: 13px; font-weight: 700;
+  }
+  .step h3 { font-size: 15.5px; font-weight: 650; }
+  .step p { margin-top: 7px; font-size: 14px; color: var(--text-muted); }
+
+  /* ---------------- faq ---------------- */
+  .faq { max-width: 780px; }
+  .faq details {
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--surface); margin-bottom: 10px;
+    box-shadow: var(--shadow-sm);
+  }
+  .faq summary {
+    list-style: none; cursor: pointer; padding: 16px 20px;
+    font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after {
+    content: '+'; margin-left: auto; font-size: 19px; font-weight: 400;
+    color: var(--text-faint); line-height: 1;
+  }
+  .faq details[open] summary::after { content: '–'; }
+  .faq .answer { padding: 0 20px 18px; font-size: 14.5px; color: var(--text-muted); }
+
+  /* ---------------- closing cta ---------------- */
+  .cta-band { background: var(--ink); color: var(--ink-text); padding: 66px 0; }
+  .cta-inner { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
+  .cta-inner h2 { font-size: clamp(24px, 3.2vw, 31px); font-weight: 700; }
+  .cta-inner p { margin-top: 10px; font-size: 15.5px; color: var(--ink-muted); max-width: 52ch; }
+  .cta-inner .btn--primary { background: #fff; color: var(--ink); }
+  .cta-inner .btn--primary:hover { background: #e6e9f5; }
+  .cta-actions { margin-left: auto; display: flex; gap: 12px; }
+
+  /* ---------------- footer ---------------- */
+  footer.site-foot { background: var(--surface); border-top: 1px solid var(--border); padding: 40px 0 48px; }
+  .foot-top { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .foot-links { display: flex; gap: 26px; margin-left: auto; flex-wrap: wrap; }
+  .foot-links a { font-size: 13.5px; color: var(--text-muted); text-decoration: none; }
+  .foot-links a:hover { color: var(--text); }
+  .foot-legal {
+    margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border);
+    font-size: 12.5px; color: var(--text-faint); display: flex; flex-wrap: wrap; gap: 8px 18px;
+  }
+
+  /* ---------------- floating call button ---------------- */
+  .fab {
+    position: fixed; right: 22px; bottom: 22px; z-index: 45;
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 13px 20px 13px 16px; border: none; border-radius: 999px;
+    background: var(--success); color: #fff; cursor: pointer;
+    font: inherit; font-size: 14.5px; font-weight: 650;
+    box-shadow: 0 14px 34px -10px color-mix(in srgb, var(--success) 75%, transparent);
+    transition: background 0.15s, transform 0.08s, opacity 0.2s;
+  }
+  .fab:hover { background: var(--success-hover); }
+  .fab:active { transform: translateY(1px); }
+  .fab svg { width: 20px; height: 20px; }
+  .fab[data-oncall="true"] { background: var(--brand-solid); }
+  @media (max-width: 560px) { .fab { right: 14px; bottom: 14px; } .fab .fab-text { display: none; } .fab { padding: 15px; } }
+
+  /* ---------------- call overlay ---------------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 60;
+    background: color-mix(in srgb, var(--ink) 62%, transparent);
+    backdrop-filter: blur(6px);
+    display: grid; place-items: center;
+    padding: 20px;
+    animation: fade 0.18s ease-out;
+  }
+  @keyframes fade { from { opacity: 0; } }
+  .overlay[hidden] { display: none !important; }
+
+  .callbox {
+    width: 100%; max-width: 460px;
+    max-height: min(92vh, 780px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    box-shadow: var(--shadow-lg);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    animation: rise 0.2s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+  @keyframes rise { from { transform: translateY(12px) scale(0.985); opacity: 0; } }
+
+  .callbox-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px 14px 18px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .callbox-head .title { font-size: 14px; font-weight: 650; }
+  .icon-btn {
+    margin-left: auto; width: 32px; height: 32px; border-radius: 9px;
+    border: 1px solid transparent; background: transparent; color: var(--text-muted);
+    cursor: pointer; display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--surface-alt); color: var(--text); }
+  .icon-btn svg { width: 16px; height: 16px; }
+
+  .callbox-body { padding: 22px 20px; overflow-y: auto; flex: 1; min-height: 0; }
+
+  /* agent orb */
+  .agent { text-align: center; }
+  .orb-wrap { position: relative; width: 132px; height: 132px; margin: 4px auto 0; }
+  .orb {
+    position: absolute; inset: 18px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand), #7c3aed);
+    color: #fff; display: grid; place-items: center;
+    font-size: 30px; font-weight: 700; letter-spacing: -0.02em;
+    box-shadow: 0 10px 30px -10px color-mix(in srgb, var(--brand) 70%, transparent);
+    transform: scale(calc(1 + var(--level, 0) * 0.09));
+    transition: transform 0.09s linear;
+  }
+  .orb-ring {
+    position: absolute; inset: 18px; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--brand) 45%, transparent);
+    opacity: calc(0.15 + var(--level, 0) * 0.85);
+    transform: scale(calc(1.06 + var(--level, 0) * 0.5));
+    transition: transform 0.12s linear, opacity 0.12s linear;
+    pointer-events: none;
+  }
+  .orb-ring.two {
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    transform: scale(calc(1.16 + var(--level, 0) * 0.85));
+    opacity: calc(0.08 + var(--level, 0) * 0.5);
+  }
+  .agent-name { margin-top: 16px; font-size: 18px; font-weight: 700; }
+  .agent-role { margin-top: 2px; font-size: 13px; color: var(--text-faint); }
+
+  .status-row {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin-top: 16px; min-height: 26px;
+  }
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 650; padding: 5px 11px 5px 9px;
+    border-radius: 999px;
+  }
+  .status::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .status.idle { background: color-mix(in srgb, var(--text-faint) 14%, transparent); color: var(--text-faint); }
+  .status.connecting { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
+  .status.connecting::before { animation: blink 1s steps(2, end) infinite; }
+  .status.connected { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+  .status.connected::before { animation: pulse 1.5s ease-in-out infinite; }
+  .status.error { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes blink { 50% { opacity: 0.25; } }
+  .call-timer { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 650; color: var(--text-muted); }
+  .muted-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 650; padding: 5px 10px; border-radius: 999px;
+    background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger);
+  }
+  .muted-badge svg { width: 12px; height: 12px; }
+
+  /* mic level meter */
+  .mic-meter { display: flex; align-items: flex-end; justify-content: center; gap: 3px; height: 22px; margin-top: 14px; }
+  .mic-meter span {
+    width: 3px; border-radius: 2px; background: var(--accent);
+    height: calc(3px + var(--h, 0) * 19px);
+    transition: height 0.08s linear, background 0.2s;
+  }
+  .mic-meter[data-muted="true"] span { background: var(--border-strong); --h: 0; }
+
+  /* pre-call form */
+  .precall { margin-top: 22px; text-align: left; }
+  label { display: block; font-size: 12px; font-weight: 650; color: var(--text-muted); margin-bottom: 6px; }
+  .field { margin-bottom: 14px; }
+  input[type="text"], input[type="tel"], input[type="date"] {
+    width: 100%; padding: 11px 13px; font: inherit; font-size: 14px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface-alt); color: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+  }
+  input:focus { outline: none; border-color: var(--brand); background: var(--surface); box-shadow: 0 0 0 3px var(--ring); }
+  input.invalid { border-color: var(--danger); }
+  .hint { font-size: 12px; color: var(--text-faint); margin: 6px 2px 0; }
+  .hint.error { color: var(--danger); }
+  .connect-btn { width: 100%; margin-top: 18px; }
+  .connect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .connect-btn.btn--primary { background: var(--success); }
+  .connect-btn.btn--primary:hover { background: var(--success-hover); }
+
+  /* transcript */
+  .transcript-block { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px; }
+  .transcript-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+  }
+  .transcript-head .t { font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
+  .transcript-head .s { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+  #transcript {
+    height: 208px; overflow-y: auto;
+    display: flex; flex-direction: column;
+    padding-right: 4px;
+  }
+  #transcript:empty::after {
+    content: 'Your conversation will appear here as you speak.';
+    color: var(--text-faint); font-size: 13px; text-align: center;
+    margin: auto; max-width: 24ch;
+  }
+  .msg { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 12px; max-width: 100%; }
+  .msg.user { flex-direction: row-reverse; margin-left: auto; }
+  .msg.assistant { margin-right: auto; }
+  .msg .avatar {
+    width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center; font-size: 10.5px; font-weight: 700;
+  }
+  .msg.assistant .avatar { background: linear-gradient(135deg, var(--brand), #7c3aed); color: #fff; }
+  .msg.user .avatar { background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border); }
+  .msg .bubble {
+    max-width: 300px; padding: 9px 13px; border-radius: 15px;
+    font-size: 13.5px; line-height: 1.45; word-wrap: break-word;
+  }
+  .msg.assistant .bubble { background: var(--surface-alt); border-bottom-left-radius: 4px; }
+  .msg.user .bubble { background: var(--brand-solid); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.system { justify-content: center; margin: 4px 0 12px; }
+  .msg.system .bubble {
+    background: var(--surface-alt); color: var(--text-faint);
+    font-size: 11.5px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  }
+
+  /* in-call controls */
+  .controls {
+    flex-shrink: 0; border-top: 1px solid var(--border);
+    background: var(--surface-alt);
+    padding: 16px 20px 18px;
+    display: flex; justify-content: center; gap: 34px;
+  }
+  .ctl { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+  .ctl-btn {
+    width: 56px; height: 56px; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); cursor: pointer;
+    display: grid; place-items: center;
+    box-shadow: var(--shadow-sm);
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.06s;
+  }
+  .ctl-btn svg { width: 22px; height: 22px; }
+  .ctl-btn:hover:not(:disabled) { border-color: var(--border-strong); }
+  .ctl-btn:active:not(:disabled) { transform: scale(0.95); }
+  .ctl-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+  .ctl-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+  .ctl-btn[aria-pressed="true"] { background: var(--danger); border-color: var(--danger); color: #fff; }
+  /* The mute glyph follows aria-pressed rather than a JS-toggled `hidden`:
+     `hidden` is an HTML attribute and does nothing on an <svg> element. */
+  .ctl-btn[aria-pressed="false"] .icon--mic-off,
+  .ctl-btn[aria-pressed="true"] .icon--mic { display: none; }
+  .ctl-btn--end { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .ctl-btn--end:hover:not(:disabled) { background: var(--danger-hover); border-color: var(--danger-hover); }
+  .ctl-label { font-size: 11.5px; font-weight: 650; color: var(--text-muted); }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001s !important; animation-iteration-count: 1 !important; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ nav ============ -->
+<nav class="site-nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">A</span>
+      <span class="brand-name">INSUVOX</span>
+    </a>
+    <div class="nav-links">
+      <a href="#services">Support</a>
+      <a href="#how">How it works</a>
+      <a href="#claims">Claims</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <div class="nav-cta">
+      <span class="nav-hint">Support lines open 24×7</span>
+      <button class="btn btn--primary" data-call-trigger>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+        Talk to Ava
+      </button>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ hero ============ -->
+<header class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow"><span class="live-dot"></span>AI voice support · available now</span>
+      <h1>Insurance support that answers on the first ring.</h1>
+      <p class="lede">
+        Tap to call and speak to Ava, our AI voice assistant. She pulls up your
+        policy, registers a claim, and hands you to a specialist the moment a
+        human is the better answer — no menus, no hold music.
+      </p>
+      <div class="hero-actions">
+        <button class="btn btn--primary btn--lg" data-call-trigger>
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+          Start a call
+        </button>
+        <a class="btn btn--ghost btn--lg" href="#how">See how it works</a>
+      </div>
+      <p class="hero-note">Works right in your browser — your microphone, no app to install.</p>
+    </div>
+
+    <div class="call-card">
+      <p class="who">Customer care</p>
+      <h3>Ava — Voice Assistant</h3>
+      <p class="desc">Policies · Claims · Renewals · Human handoff</p>
+      <button class="dial-btn" data-call-trigger aria-label="Call Ava now">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+      </button>
+      <p class="dial-label">Call now</p>
+      <p class="dial-sub">Answered instantly · mute anytime</p>
+      <div class="card-foot">
+        <span>🔒 Encrypted</span>
+        <span>📝 Live transcript</span>
+        <span>🎙️ Mic only</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ stats ============ -->
+<div class="stats">
+  <div class="wrap">
+    <div class="stats-grid">
+      <div class="stat"><div class="val">24×7</div><div class="key">Always answered</div></div>
+      <div class="stat"><div class="val">0 min</div><div class="key">Time spent on hold</div></div>
+      <div class="stat"><div class="val">1 tap</div><div class="key">To reach a human</div></div>
+      <div class="stat"><div class="val">Instant</div><div class="key">Claim reference number</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ services ============ -->
+<section class="band" id="services">
+  <div class="wrap">
+    <div class="band-head">
+      <p class="kicker">What Ava can do</p>
+      <h2>Three of the calls you actually make, handled end to end</h2>
+      <p>Say what you need in your own words. Ava works out the rest and only asks for what she genuinely needs.</p>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg></div>
+        <h3>Check your policy</h3>
+        <p>Confirm what's covered before you commit to a repair or a hospital.</p>
+        <ul>
+          <li>Cover, status and expiry date</li>
+          <li>Which vehicle or member is on the policy</li>
+          <li>Renewal due dates and next steps</li>
+        </ul>
+      </article>
+      <article class="card" id="claims">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <h3>Register a claim</h3>
+        <p>Cashless or reimbursement — logged during the call, with a reference read back to you.</p>
+        <ul>
+          <li>Cashless at a network garage or hospital</li>
+          <li>Reimbursement for what you've already paid</li>
+          <li>Larger estimates routed for approval</li>
+        </ul>
+      </article>
+      <article class="card">
+        <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+        <h3>Reach a specialist</h3>
+        <p>Ask for a person at any point and the handoff carries your context with it.</p>
+        <ul>
+          <li>No repeating yourself from the top</li>
+          <li>Summary of the call passed along</li>
+          <li>Escalation reference for follow-up</li>
+        </ul>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ how it works ============ -->
+<section class="band steps-band" id="how">
+  <div class="wrap">
+    <div class="band-head">
+      <p class="kicker">How it works</p>
+      <h2>From tap to resolved, in one conversation</h2>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <h3>Tap call</h3>
+        <p>Your browser asks once for microphone access. Nothing to download.</p>
+      </div>
+      <div class="step">
+        <h3>We know who you are</h3>
+        <p>Your name, date of birth and registered mobile number are all we ask, and they’re why Ava skips the identity questions.</p>
+      </div>
+      <div class="step">
+        <h3>Say what you need</h3>
+        <p>Ava looks things up and acts while you're still on the call, reading back anything she records.</p>
+      </div>
+      <div class="step">
+        <h3>Handoff, if needed</h3>
+        <p>Anything better answered by a person goes to a specialist with the full context.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ faq ============ -->
+<section class="band" id="faq">
+  <div class="wrap">
+    <div class="band-head">
+      <p class="kicker">Good to know</p>
+      <h2>Questions people ask before calling</h2>
+    </div>
+    <div class="faq">
+      <details open>
+        <summary>Am I speaking to a real person?</summary>
+        <div class="answer">No — Ava is an AI voice assistant, and she says so when she picks up. Ask for a human at any point in the call and she'll escalate to a specialist along with a summary of what you've already told her. When that specialist picks up, Ava leaves the call entirely — from then on you're speaking only to the person.</div>
+      </details>
+      <details>
+        <summary>Do I need my policy number ready?</summary>
+        <div class="answer">No — the three details you enter before the call are enough to find your policy. Ava looks it up before she says hello, so she opens by name and never makes you read your number or date of birth out loud. If the number you give isn't the registered one, your name and date of birth are what she checks you against instead.</div>
+      </details>
+      <details>
+        <summary>Can I mute myself mid-call?</summary>
+        <div class="answer">Yes. The mute button stops your microphone from being sent at all — useful if someone walks in or you need to check a document. Ava keeps talking; unmute when you're ready and carry on.</div>
+      </details>
+      <details>
+        <summary>What happens to the conversation?</summary>
+        <div class="answer">The call is transcribed live so you can read along in the call window, and that transcript is what gets handed to a specialist if you're escalated. Audio goes only between your browser and our support service over an encrypted connection.</div>
+      </details>
+      <details>
+        <summary>What if the line drops?</summary>
+        <div class="answer">Anything Ava recorded during the call — a claim, for instance — already has a reference number. Call back, mention it, and she picks up from there.</div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ============ closing cta ============ -->
+<section class="cta-band">
+  <div class="wrap cta-inner">
+    <div>
+      <h2>Got a question about your cover?</h2>
+      <p>Ava is on the line right now. Most calls are done in a couple of minutes.</p>
+    </div>
+    <div class="cta-actions">
+      <button class="btn btn--primary btn--lg" data-call-trigger>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+        Call Ava
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ footer ============ -->
+<footer class="site-foot">
+  <div class="wrap">
+    <div class="foot-top">
+      <div>
+        <a class="brand" href="#top">
+          <span class="brand-mark">A</span>
+          <span class="brand-name">INSUVOX</span>
+        </a>
+        <p style="margin-top:10px;font-size:13.5px;color:var(--text-muted);max-width:34ch">
+          Motor and health cover, with support that picks up.
+        </p>
+      </div>
+      <div class="foot-links">
+        <a href="#services">Support</a>
+        <a href="#how">How it works</a>
+        <a href="#claims">Claims</a>
+        <a href="#faq">FAQ</a>
+      </div>
+    </div>
+    <div class="foot-legal">
+      <span>Demo environment — INSUVOX is a fictional brand and the policy and claim data behind this page is sample data.</span>
+      <span>Ava is an AI assistant, not a licensed advisor.</span>
+    </div>
+  </div>
+</footer>
+
+<!-- ============ floating call button ============ -->
+<button class="fab" id="fab" data-call-trigger aria-label="Call Ava">
+  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+  <span class="fab-text">Call Ava</span>
+</button>
+
+<!-- ============ call overlay ============ -->
+<div class="overlay" id="overlay" hidden role="dialog" aria-modal="true" aria-labelledby="callboxTitle">
+  <div class="callbox">
+    <div class="callbox-head">
+      <span class="title" id="callboxTitle">INSUVOX customer care</span>
+      <button class="icon-btn" id="closeBtn" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="callbox-body">
+      <div class="agent">
+        <div class="orb-wrap" id="orbWrap">
+          <span class="orb-ring"></span>
+          <span class="orb-ring two"></span>
+          <span class="orb">A</span>
+        </div>
+        <p class="agent-name" id="agentName">Ava</p>
+        <p class="agent-role" id="agentRole">AI Voice Assistant · INSUVOX</p>
+
+        <div class="status-row">
+          <span id="status" class="status idle">Not connected</span>
+          <span id="callTimer" class="call-timer" hidden>00:00</span>
+          <span id="mutedBadge" class="muted-badge" hidden>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 10.6V5a3 3 0 0 0-5.9-.75l5.9 6.35zM4.3 3 3 4.3l6 6V11a3 3 0 0 0 4.5 2.6l1.2 1.3A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.9V21h2v-3.1a6.9 6.9 0 0 0 2.9-1.1l3.8 3.9 1.3-1.3z"/></svg>
+            Muted
+          </span>
+        </div>
+
+        <div class="mic-meter" id="micMeter" data-muted="false" aria-hidden="true" hidden>
+          <span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+      </div>
+
+      <!-- pre-call: shown while not on a call -->
+      <div class="precall" id="precall">
+        <div class="field">
+          <label for="fullName">Full name</label>
+          <input id="fullName" type="text" autocomplete="name" placeholder="e.g. Priya Sharma">
+          <p id="nameHint" class="hint">As it appears on your policy.</p>
+        </div>
+
+        <div class="field">
+          <label for="dateOfBirth">Date of birth</label>
+          <input id="dateOfBirth" type="date" autocomplete="bday" max="">
+          <p id="dobHint" class="hint">Checked against your policy so Ava never asks you for it on the call.</p>
+        </div>
+
+        <div class="field">
+          <label for="mobileNumber">Registered mobile number</label>
+          <input id="mobileNumber" type="tel" inputmode="tel" autocomplete="tel" placeholder="e.g. +61 412 345 678">
+          <p id="mobileHint" class="hint">Lets Ava pull up your policy without asking you to read it out.</p>
+        </div>
+
+        <p id="configHint" class="hint error" hidden></p>
+
+        <button class="btn btn--primary btn--lg connect-btn" id="connectBtn">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.57.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.57 1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>
+          Call Ava
+        </button>
+      </div>
+
+      <!-- live transcript: shown once the call is up -->
+      <div class="transcript-block" id="transcriptBlock" hidden>
+        <div class="transcript-head">
+          <span class="t">Live transcript</span>
+          <span class="s">Real-time</span>
+        </div>
+        <div id="transcript" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <!-- in-call controls -->
+    <div class="controls" id="controls" hidden>
+      <div class="ctl">
+        <button class="ctl-btn" id="muteBtn" aria-pressed="false" aria-label="Mute microphone">
+          <svg class="icon--mic" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z"/></svg>
+          <svg class="icon--mic-off" viewBox="0 0 24 24" fill="currentColor"><path d="M15 10.6V5a3 3 0 0 0-5.9-.75l5.9 6.35zM4.3 3 3 4.3l6 6V11a3 3 0 0 0 4.5 2.6l1.2 1.3A5 5 0 0 1 7 11H5a7 7 0 0 0 6 6.9V21h2v-3.1a6.9 6.9 0 0 0 2.9-1.1l3.8 3.9 1.3-1.3z"/></svg>
+        </button>
+        <span class="ctl-label" id="muteLabel">Mute</span>
+      </div>
+      <div class="ctl">
+        <button class="ctl-btn ctl-btn--end" id="endBtn" aria-label="End call">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c-2.4 0-4.7.38-6.87 1.08a1.6 1.6 0 0 0-1.1 1.71l.36 2.94a1.6 1.6 0 0 0 1.2 1.36c.79.2 1.5.48 2.16.81a1.6 1.6 0 0 0 1.74-.24l1.44-1.27a13 13 0 0 1 2.14 0l1.44 1.27a1.6 1.6 0 0 0 1.74.24c.66-.33 1.37-.6 2.16-.81a1.6 1.6 0 0 0 1.2-1.36l.36-2.94a1.6 1.6 0 0 0-1.1-1.71A22.7 22.7 0 0 0 12 8z"/></svg>
+        </button>
+        <span class="ctl-label">End call</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Deployment config (CALL_ENDPOINT), generated from .env by
+     `python frontend/make_config.py`. Not committed; a 404 here just means it
+     hasn't been generated yet, and the call panel says so. -->
+<script src="config.js"></script>
+<script>
+// ---------------------------------------------------------------- elements
+const overlay = document.getElementById('overlay');
+const fab = document.getElementById('fab');
+const closeBtn = document.getElementById('closeBtn');
+const connectBtn = document.getElementById('connectBtn');
+const muteBtn = document.getElementById('muteBtn');
+const muteLabel = document.getElementById('muteLabel');
+const endBtn = document.getElementById('endBtn');
+const statusEl = document.getElementById('status');
+const callTimerEl = document.getElementById('callTimer');
+const mutedBadge = document.getElementById('mutedBadge');
+const micMeter = document.getElementById('micMeter');
+const micBars = [...micMeter.querySelectorAll('span')];
+const orbWrap = document.getElementById('orbWrap');
+const precall = document.getElementById('precall');
+const transcriptBlock = document.getElementById('transcriptBlock');
+const transcriptEl = document.getElementById('transcript');
+const controls = document.getElementById('controls');
+const mobileInput = document.getElementById('mobileNumber');
+const mobileHint = document.getElementById('mobileHint');
+const nameInput = document.getElementById('fullName');
+const nameHint = document.getElementById('nameHint');
+const dobInput = document.getElementById('dateOfBirth');
+const dobHint = document.getElementById('dobHint');
+const configHint = document.getElementById('configHint');
+const agentNameEl = document.getElementById('agentName');
+const agentRoleEl = document.getElementById('agentRole');
+
+const MOBILE_HINT_DEFAULT = mobileHint.textContent;
+const NAME_HINT_DEFAULT = nameHint.textContent;
+const DOB_HINT_DEFAULT = dobHint.textContent;
+const MOBILE_PATTERN = /^\+?[\d\-\s]{7,20}$/;
+// Latin script, the punctuation that turns up inside real names, and a few
+// words at most. Kept in step with _FULL_NAME_UI_PATTERN and _MAX_NAME_WORDS
+// in agentcore_app/strands_agent.py, which check the same thing again on
+// arrival — this side exists only so the caller finds out before they're on a
+// call rather than after.
+const NAME_PATTERN = /^[A-Za-z][A-Za-z .'\-]{1,59}$/;
+const MAX_NAME_WORDS = 5;
+
+mobileInput.value = localStorage.getItem('ava_mobile_number') || '';
+nameInput.value = localStorage.getItem('ava_full_name') || '';
+dobInput.value = localStorage.getItem('ava_date_of_birth') || '';
+// Nobody's date of birth is in the future, and the browser's own date picker
+// will say so before any of our code has to.
+dobInput.max = new Date().toISOString().slice(0, 10);
+
+// ---------------------------------------------------------------- config
+// Where a call goes is deployment config, not something a caller should be
+// typing into the page, so it lives in .env (CALL_ENDPOINT) and reaches the
+// browser through config.js, written by `python frontend/make_config.py`.
+// config.js is generated and gitignored; it's absent until that's run, which
+// is the one case this page can't call anywhere.
+const CALL_ENDPOINT = String(window.AVA_CONFIG?.callEndpoint || '').trim();
+
+if (!CALL_ENDPOINT) {
+  connectBtn.disabled = true;
+  configHint.hidden = false;
+  configHint.textContent =
+    'Calling isn’t configured on this page yet — set CALL_ENDPOINT in .env, '
+    + 'then run: python frontend/make_config.py';
+  console.warn('[ava] no window.AVA_CONFIG.callEndpoint — run: python frontend/make_config.py');
+}
+
+// ---------------------------------------------------------------- overlay
+// Every "call" affordance on the page (nav, hero, hero dial pad, closing CTA,
+// floating button) opens the same call panel; if a call is already up it just
+// brings the panel back rather than starting a second one.
+let lastFocused = null;
+
+function openCallPanel() {
+  lastFocused = document.activeElement;
+  overlay.hidden = false;
+  document.body.style.overflow = 'hidden';
+  (ws ? muteBtn : connectBtn).focus();
+}
+
+function closeCallPanel() {
+  overlay.hidden = true;
+  document.body.style.overflow = '';
+  if (lastFocused) lastFocused.focus();
+}
+
+for (const el of document.querySelectorAll('[data-call-trigger]')) {
+  el.addEventListener('click', openCallPanel);
+}
+closeBtn.addEventListener('click', closeCallPanel);
+overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeCallPanel(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !overlay.hidden) closeCallPanel();
+});
+
+function setCallUiState(onCall) {
+  precall.hidden = onCall;
+  transcriptBlock.hidden = !onCall;
+  controls.hidden = !onCall;
+  // The level meter only means anything while there's a live mic to meter.
+  micMeter.hidden = !onCall;
+  fab.dataset.oncall = String(onCall);
+  fab.querySelector('.fab-text').textContent = onCall ? 'Back to call' : 'Call Ava';
+}
+
+// ---------------------------------------------------------------- mobile no.
+function validateMobile() {
+  const value = mobileInput.value.trim();
+  if (!value) {
+    mobileInput.classList.remove('invalid');
+    mobileHint.textContent = MOBILE_HINT_DEFAULT;
+    mobileHint.classList.remove('error');
+    return null;
+  }
+  if (!MOBILE_PATTERN.test(value)) {
+    mobileInput.classList.add('invalid');
+    mobileHint.textContent = 'Enter a valid mobile number (digits only, optionally starting with +).';
+    mobileHint.classList.add('error');
+    return false;
+  }
+  mobileInput.classList.remove('invalid');
+  mobileHint.textContent = MOBILE_HINT_DEFAULT;
+  mobileHint.classList.remove('error');
+  return value;
+}
+
+mobileInput.addEventListener('input', validateMobile);
+
+// ---------------------------------------------------------------- name, dob
+// Same three-way answer as validateMobile: a value when it's usable, false
+// when what's there is wrong, null when the field is simply empty. start()
+// treats null and false the same way — all three fields are required — but
+// keeping them apart is what lets the hint say which of the two it is.
+function validateName() {
+  const value = nameInput.value.trim().replace(/\s+/g, ' ');
+  if (!value) return setFieldState(nameInput, nameHint, NAME_HINT_DEFAULT, null);
+  if (!NAME_PATTERN.test(value) || value.split(' ').length > MAX_NAME_WORDS) {
+    return setFieldState(nameInput, nameHint,
+      'Enter your name as it appears on your policy (letters, spaces, hyphens).', false);
+  }
+  return setFieldState(nameInput, nameHint, NAME_HINT_DEFAULT, value);
+}
+
+function validateDob() {
+  const value = dobInput.value.trim();
+  if (!value) return setFieldState(dobInput, dobHint, DOB_HINT_DEFAULT, null);
+  // The input hands back YYYY-MM-DD, which is also what the identity check
+  // wants — so there's no reformatting anywhere between here and the tool.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value > dobInput.max) {
+    return setFieldState(dobInput, dobHint, 'Enter your date of birth.', false);
+  }
+  return setFieldState(dobInput, dobHint, DOB_HINT_DEFAULT, value);
+}
+
+function setFieldState(input, hint, message, result) {
+  input.classList.toggle('invalid', result === false);
+  hint.classList.toggle('error', result === false);
+  hint.textContent = message;
+  return result;
+}
+
+nameInput.addEventListener('input', validateName);
+dobInput.addEventListener('input', validateDob);
+
+let syncHintTimeout = null;
+
+function syncMobileNumber(value) {
+  mobileInput.value = value;
+  localStorage.setItem('ava_mobile_number', value);
+  validateMobile();
+
+  mobileHint.textContent = 'Updated from the call — Ava confirmed a different number.';
+  mobileHint.classList.remove('error');
+  if (syncHintTimeout) clearTimeout(syncHintTimeout);
+  syncHintTimeout = setTimeout(() => {
+    mobileHint.textContent = MOBILE_HINT_DEFAULT;
+    syncHintTimeout = null;
+  }, 4000);
+}
+
+// ---------------------------------------------------------------- call state
+let ws = null;
+let audioCtx = null;
+let micStream = null;
+let micNode = null;
+let workletNode = null;
+let micAnalyser = null;
+let playbackBus = null;
+let playbackAnalyser = null;
+let levelRaf = null;
+let nextPlaybackTime = 0;
+let scheduledSources = [];
+let micBuffer = [];
+let isMuted = false;
+const MIC_CHUNK_SAMPLES = 1600; // ~100ms at 16kHz before sending over the wire
+
+let callTimerInterval = null;
+let callStartedAt = 0;
+
+function startCallTimer() {
+  callStartedAt = Date.now();
+  callTimerEl.hidden = false;
+  callTimerEl.textContent = '00:00';
+  callTimerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - callStartedAt) / 1000);
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
+    callTimerEl.textContent = `${mm}:${ss}`;
+  }, 1000);
+}
+
+function stopCallTimer() {
+  if (callTimerInterval) clearInterval(callTimerInterval);
+  callTimerInterval = null;
+  callTimerEl.hidden = true;
+}
+
+function setStatus(state, text) {
+  statusEl.className = `status ${state}`;
+  statusEl.textContent = text || state;
+}
+
+// ---------------------------------------------------------------- transcript
+function addSystemLine(text) {
+  const div = document.createElement('div');
+  div.className = 'msg system';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  div.appendChild(bubble);
+  transcriptEl.appendChild(div);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function makeMessageRow(role) {
+  const row = document.createElement('div');
+  row.className = `msg ${role}`;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  if (role === 'user') {
+    avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="13" height="13"><path d="M12 12a4.8 4.8 0 1 0 0-9.6 4.8 4.8 0 0 0 0 9.6zm0 2.4c-4.4 0-8.4 2.24-8.4 5.4v.6c0 .66.54 1.2 1.2 1.2h14.4c.66 0 1.2-.54 1.2-1.2v-.6c0-3.16-4-5.4-8.4-5.4z"/></svg>';
+  } else {
+    avatar.textContent = 'A';
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  transcriptEl.appendChild(row);
+  return bubble;
+}
+
+// bidi_transcript_stream fires once per incremental delta, not once per
+// finished sentence — this tracks one in-progress bubble per role and
+// overwrites its text as deltas arrive, instead of appending a new bubble
+// for every fragment. is_final closes the bubble out so the next utterance
+// from that role starts a fresh one.
+const activeStreamBubbles = { user: null, assistant: null };
+
+function upsertStreamLine(role, text, isFinal) {
+  let bubble = activeStreamBubbles[role];
+  if (!bubble) {
+    bubble = makeMessageRow(role);
+    activeStreamBubbles[role] = bubble;
+  }
+  bubble.textContent = text;
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  if (isFinal) {
+    activeStreamBubbles[role] = null;
+  }
+}
+
+// --- base64 <-> PCM16 helpers ---
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function int16ToBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToFloat32(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 0x8000;
+  return float32;
+}
+
+// --- playback (sequential queue, no overlap) ---
+
+function playAudioChunk(base64, sampleRate) {
+  const float32 = base64ToFloat32(base64);
+  const buffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+  buffer.copyToChannel(float32, 0);
+
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  // Routed through playbackBus (rather than straight to the destination) so
+  // the analyser hanging off it can drive the orb's "Ava is speaking" pulse.
+  source.connect(playbackBus);
+
+  const now = audioCtx.currentTime;
+  const startAt = Math.max(now, nextPlaybackTime);
+  source.start(startAt);
+  nextPlaybackTime = startAt + buffer.duration;
+
+  scheduledSources.push(source);
+  source.onended = () => {
+    scheduledSources = scheduledSources.filter((s) => s !== source);
+  };
+}
+
+function stopPlayback() {
+  // Barge-in: stop every scheduled/playing chunk immediately. Just resetting
+  // nextPlaybackTime (the old approach) doesn't un-schedule anything already
+  // playing, so Ava's stale audio kept playing underneath whatever came next.
+  for (const source of scheduledSources) {
+    try {
+      source.stop();
+    } catch (err) {
+      // already finished playing on its own
+    }
+  }
+  scheduledSources = [];
+  nextPlaybackTime = audioCtx.currentTime;
+}
+
+// --- level metering (orb pulse + caller mic bars) ---
+
+function rms(analyser, scratch) {
+  analyser.getByteTimeDomainData(scratch);
+  let sum = 0;
+  for (let i = 0; i < scratch.length; i++) {
+    const v = (scratch[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / scratch.length);
+}
+
+function startLevelLoop() {
+  const playbackScratch = new Uint8Array(playbackAnalyser.fftSize);
+  const micScratch = new Uint8Array(micAnalyser.fftSize);
+  let smoothedOrb = 0;
+  const smoothedBars = micBars.map(() => 0);
+
+  const tick = () => {
+    const orbTarget = Math.min(1, rms(playbackAnalyser, playbackScratch) * 6);
+    smoothedOrb += (orbTarget - smoothedOrb) * 0.3;
+    orbWrap.style.setProperty('--level', smoothedOrb.toFixed(3));
+
+    const micLevel = isMuted ? 0 : Math.min(1, rms(micAnalyser, micScratch) * 7);
+    micBars.forEach((bar, i) => {
+      // Middle bars react hardest, so the meter reads as one shape rather
+      // than ten independent bars all doing the same thing.
+      const weight = 0.45 + 0.55 * Math.sin((Math.PI * (i + 0.5)) / micBars.length);
+      const target = micLevel * weight;
+      smoothedBars[i] += (target - smoothedBars[i]) * 0.35;
+      bar.style.setProperty('--h', smoothedBars[i].toFixed(3));
+    });
+
+    levelRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopLevelLoop() {
+  if (levelRaf) cancelAnimationFrame(levelRaf);
+  levelRaf = null;
+  orbWrap.style.setProperty('--level', '0');
+  micBars.forEach((bar) => bar.style.setProperty('--h', '0'));
+}
+
+// --- mic capture via AudioWorklet ---
+
+const WORKLET_SOURCE = `
+  class MicCaptureProcessor extends AudioWorkletProcessor {
+    process(inputs) {
+      const input = inputs[0];
+      if (input && input[0]) {
+        this.port.postMessage(input[0].slice());
+      }
+      return true;
+    }
+  }
+  registerProcessor('mic-capture-processor', MicCaptureProcessor);
+`;
+
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
+  });
+
+  audioCtx = new AudioContext({ sampleRate: 16000 });
+  nextPlaybackTime = audioCtx.currentTime;
+
+  playbackBus = audioCtx.createGain();
+  playbackAnalyser = audioCtx.createAnalyser();
+  playbackAnalyser.fftSize = 512;
+  playbackBus.connect(playbackAnalyser);
+  playbackBus.connect(audioCtx.destination);
+
+  const workletBlobUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }));
+  await audioCtx.audioWorklet.addModule(workletBlobUrl);
+  URL.revokeObjectURL(workletBlobUrl);
+
+  micNode = audioCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(audioCtx, 'mic-capture-processor');
+  micAnalyser = audioCtx.createAnalyser();
+  micAnalyser.fftSize = 512;
+  micNode.connect(micAnalyser);
+
+  workletNode.port.onmessage = (event) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Muted: drop the captured audio on the floor instead of sending it, and
+    // keep the buffer empty so unmuting doesn't flush a backlog of speech
+    // recorded while muted.
+    if (isMuted) {
+      micBuffer = [];
+      return;
+    }
+    micBuffer.push(event.data);
+    const total = micBuffer.reduce((n, c) => n + c.length, 0);
+    if (total < MIC_CHUNK_SAMPLES) return;
+
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const chunk of micBuffer) { merged.set(chunk, offset); offset += chunk.length; }
+    micBuffer = [];
+
+    const pcm16 = floatTo16BitPCM(merged);
+    ws.send(JSON.stringify({
+      type: 'bidi_audio_input',
+      audio: int16ToBase64(pcm16),
+      format: 'pcm',
+      sample_rate: 16000,
+      channels: 1,
+    }));
+  };
+
+  micNode.connect(workletNode);
+  startLevelLoop();
+}
+
+function stopMic() {
+  stopLevelLoop();
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  if (workletNode) workletNode.disconnect();
+  if (micNode) micNode.disconnect();
+  if (micAnalyser) micAnalyser.disconnect();
+  if (playbackBus) playbackBus.disconnect();
+  if (playbackAnalyser) playbackAnalyser.disconnect();
+  // Each call builds a fresh AudioContext; without closing the old one the
+  // browser's per-page context limit is hit after a handful of calls.
+  if (audioCtx) audioCtx.close().catch(() => {});
+  micStream = micNode = workletNode = micAnalyser = null;
+  playbackBus = playbackAnalyser = audioCtx = null;
+  micBuffer = [];
+  scheduledSources = [];
+}
+
+// --- mute ---
+
+function setMuted(value) {
+  isMuted = value;
+  micBuffer = [];
+  muteBtn.setAttribute('aria-pressed', String(isMuted));
+  muteBtn.setAttribute('aria-label', isMuted ? 'Unmute microphone' : 'Mute microphone');
+  muteLabel.textContent = isMuted ? 'Unmute' : 'Mute';
+  mutedBadge.hidden = !isMuted;
+  micMeter.dataset.muted = String(isMuted);
+}
+
+muteBtn.addEventListener('click', () => {
+  setMuted(!isMuted);
+  // Only a deliberate toggle is worth a transcript line — the reset that
+  // happens on connect/disconnect isn't.
+  addSystemLine(isMuted ? 'Microphone muted' : 'Microphone unmuted');
+});
+
+// ---------------------------------------------------------------- handoff
+// The backend sends a `bidi_handoff` event when the call moves between Ava
+// and a person (see agentcore_app/handoff.py). Nothing about the audio path
+// changes here — a human's voice arrives as the same `bidi_audio_stream`
+// events Ava's does — this is purely so the caller can see who they're
+// talking to instead of wondering why the voice changed.
+function applyHandoff(event) {
+  const state = event.state;
+  if (state === 'escalated') {
+    setStatus('connecting', 'Finding a specialist…');
+    // Two different situations arrive as this one state, and they read very
+    // differently to whoever is holding the phone. Before anyone has joined,
+    // Ava is still there and this is a wait. After a specialist has joined
+    // and left, she isn't: joining ended her session outright
+    // (`ai_available: false`), so the caller is now waiting on a person with
+    // nobody to talk to in the meantime, and saying "stay on the line" without
+    // explaining the silence would just look broken.
+    if (event.ai_available === false) {
+      addSystemLine('The specialist has left the call. Connecting you to someone '
+        + 'else — stay on the line.');
+      agentNameEl.textContent = 'INSUVOX';
+      agentRoleEl.textContent = 'Waiting for a specialist';
+    } else {
+      addSystemLine('Connecting you to a specialist — stay on the line.');
+    }
+    return;
+  }
+  if (state === 'human') {
+    const name = (event.agent_name || 'a specialist').trim();
+    agentNameEl.textContent = name;
+    agentRoleEl.textContent = 'Customer care specialist · INSUVOX';
+    setStatus('connected', 'On call');
+    addSystemLine(`${name} has joined the call.`);
+    // Ava's session ends when a person takes the call, so this is the whole
+    // conversation from here — worth saying, because the caller was told at
+    // the start that they were speaking to an AI.
+    addSystemLine('Ava has left the call — you’re speaking with a person now.');
+    // Live speech between two people isn't transcribed, so say so rather
+    // than leaving the panel looking broken.
+    addSystemLine('Transcript pauses while you speak with a person.');
+    return;
+  }
+  if (state === 'ai') {
+    agentNameEl.textContent = 'Ava';
+    agentRoleEl.textContent = 'AI Voice Assistant · INSUVOX';
+    setStatus('connected', 'On call');
+    addSystemLine('You’re back with Ava.');
+  }
+}
+
+// ---------------------------------------------------------------- lifecycle
+
+async function start() {
+  if (!CALL_ENDPOINT) {
+    setStatus('error', 'Not configured');
+    return;
+  }
+  // All three fields are what make the call personal, and none of them is
+  // something Ava should have to ask for out loud. The number is what she
+  // looks the policy up by before she says a word, so she can open with the
+  // caller's name; the name and date of birth are what the identity check
+  // takes on the path where a number alone isn't enough. Typed here, they
+  // never have to be recited down the line — so all three are required rather
+  // than optional.
+  const fields = [
+    [validateName(), nameInput, nameHint, 'Enter your full name as it appears on your policy.'],
+    [validateDob(), dobInput, dobHint, 'Enter your date of birth.'],
+    [validateMobile(), mobileInput, mobileHint,
+      'Enter your registered mobile number so Ava can pull up your policy.'],
+  ];
+  // Reported one at a time, top field first, so the caller is never shown
+  // three red lines at once for a form they haven't finished filling in.
+  for (const [value, input, hint, missingMessage] of fields) {
+    if (value === false) {
+      input.focus();
+      return;
+    }
+    if (!value) {
+      input.classList.add('invalid');
+      hint.textContent = missingMessage;
+      hint.classList.add('error');
+      input.focus();
+      return;
+    }
+  }
+  const [fullName, dateOfBirth, mobileNumber] = fields.map(([value]) => value);
+
+  localStorage.setItem('ava_full_name', fullName);
+  localStorage.setItem('ava_date_of_birth', dateOfBirth);
+  localStorage.setItem('ava_mobile_number', mobileNumber);
+
+  connectBtn.disabled = true;
+  setStatus('connecting', 'Connecting…');
+
+  try {
+    // A ws://ish endpoint (local strands_agent.py, no deploy) is a
+    // WebSocket URL already — fetch() can't request that scheme at all, so
+    // skip the presign round trip and connect straight to it. Anything
+    // else is treated as the presign Lambda's HTTP(S) endpoint, as before.
+    let url;
+    if (/^wss?:\/\//i.test(CALL_ENDPOINT)) {
+      url = CALL_ENDPOINT;
+    } else {
+      const res = await fetch(CALL_ENDPOINT);
+      if (!res.ok) throw new Error(`Presign request failed: ${res.status}`);
+      ({ url } = await res.json());
+    }
+
+    // Whoever presigned that URL put the Runtime session id in it. Read back
+    // out here rather than generated on this side, so it's the same value
+    // AgentCore is actually routing on — see the metadata message below.
+    let runtimeSessionId = '';
+    try {
+      runtimeSessionId = new URL(url).searchParams
+        .get('X-Amzn-Bedrock-AgentCore-Runtime-Session-Id') || '';
+    } catch (err) {
+      console.warn('[ava] could not read the session id out of the call URL', err);
+    }
+
+    // Set when Ava ends the call herself (she sends bidi_call_ended just
+    // before the socket closes). Without it every ending looks identical to
+    // the caller, including the ones where the call simply dropped.
+    let endedByAva = false;
+
+    ws = new WebSocket(url);
+
+    ws.onopen = async () => {
+      setStatus('connected', 'On call');
+      startCallTimer();
+      setMuted(false);
+      setCallUiState(true);
+      // Sent before anything else so the backend can use it to skip asking
+      // for the mobile number verbally — see agentcore_app/strands_agent.py.
+      //
+      // The session id rides along because of what happens if this call is
+      // escalated: AgentCore Runtime routes a connection to an instance by
+      // session id and publishes no other path, so it is the only thing that
+      // can put a human agent's browser in the same container as this call.
+      // The agent process can't discover it on its own — nothing tells the
+      // container which session it was reached on unless Runtime forwards the
+      // header — but it's right here in the URL we were handed, so this
+      // reports it. Absent for a direct ws:// endpoint (a local run), where
+      // the portal reaches the agent by origin and needs no routing hint.
+      ws.send(JSON.stringify({
+        type: 'bidi_call_metadata',
+        ...(mobileNumber ? { mobile_number: mobileNumber } : {}),
+        ...(fullName ? { full_name: fullName } : {}),
+        ...(dateOfBirth ? { date_of_birth: dateOfBirth } : {}),
+        ...(runtimeSessionId ? { runtime_session_id: runtimeSessionId } : {}),
+      }));
+      addSystemLine('Connected — speak into your microphone.');
+      try {
+        await startMic();
+      } catch (err) {
+        console.error(err);
+        addSystemLine(`Microphone unavailable: ${err.message}`);
+        setStatus('error', 'No microphone');
+      }
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.type === 'bidi_audio_stream' && data.audio) {
+        playAudioChunk(data.audio, data.sample_rate || 16000);
+      }
+      if (data.type === 'bidi_transcript_stream' && (data.text || data.current_transcript)) {
+        const role = data.role === 'user' ? 'user' : 'assistant';
+        const text = data.current_transcript ?? data.text;
+        // The backend primes Ava to speak first with a synthetic "begin now"
+        // line framed as the caller (see strands_agent.py) — it's plumbing,
+        // not something the caller actually said, so don't show it.
+        if (role === 'user' && text.includes('the call has just connected')) {
+          return;
+        }
+        upsertStreamLine(role, text, !!data.is_final);
+      }
+      if (data.type === 'bidi_interruption') {
+        stopPlayback();
+      }
+      if (data.type === 'bidi_handoff') {
+        applyHandoff(data);
+      }
+      if (data.type === 'bidi_call_ended') {
+        endedByAva = true;
+      }
+      if (data.type === 'bidi_call_metadata_update' && data.mobile_number) {
+        // Ava confirmed a different number than what the UI pre-filled —
+        // e.g. the caller corrected a wrong one mid-call (see the "Phone
+        // numbers" business rule in strands_agent.py). Keep the field and
+        // localStorage in sync so the caller doesn't have to also go back
+        // and retype it after the call.
+        syncMobileNumber(data.mobile_number);
+      }
+    };
+
+    ws.onerror = () => {
+      setStatus('error', 'Connection error');
+      addSystemLine('Connection error — see the browser console.');
+    };
+
+    ws.onclose = () => {
+      ws = null;
+      setStatus('idle', 'Call ended');
+      stopCallTimer();
+      addSystemLine(endedByAva ? 'Ava ended the call.' : 'Call ended.');
+      stopMic();
+      setMuted(false);
+      setCallUiState(false);
+      // Back to Ava for the next call, however this one ended.
+      agentNameEl.textContent = 'Ava';
+      agentRoleEl.textContent = 'AI Voice Assistant · INSUVOX';
+      connectBtn.disabled = false;
+      activeStreamBubbles.user = activeStreamBubbles.assistant = null;
+    };
+  } catch (err) {
+    console.error(err);
+    setStatus('error', 'Failed to connect');
+    transcriptBlock.hidden = false;
+    addSystemLine(`Failed to connect: ${err.message}`);
+    connectBtn.disabled = false;
+  }
+}
+
+function stop() {
+  if (ws) ws.close();
+}
+
+connectBtn.addEventListener('click', start);
+endBtn.addEventListener('click', stop);
+// A refresh or tab close should hang up rather than leave the agent session
+// open on the other end waiting for audio that will never arrive.
+window.addEventListener('beforeunload', stop);
+</script>
+</body>
+</html>

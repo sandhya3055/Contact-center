@@ -1,0 +1,5 @@
+# For portal_context_handler.py. The Lambda runtime bundles boto3, but an
+# older one that doesn't know the bedrock-agentcore client — without this the
+# escalations row still loads and the conversation comes back as a note saying
+# memory couldn't be read.
+boto3>=1.40.0

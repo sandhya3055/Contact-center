@@ -1,0 +1,112 @@
+{
+  "P1": {
+    "desc": "clean single-policy holder, no open claims",
+    "holder_name": "Priya Sharma",
+    "mobile": "0412555210",
+    "dob": "1988-03-14",
+    "policy_id": "POL-1001",
+    "status": "ACTIVE",
+    "expiry": "2027-02-28",
+    "vehicles": [
+      {
+        "reg": "ABC123",
+        "make": "Toyota Corolla"
+      }
+    ],
+    "open_claims": []
+  },
+  "P2": {
+    "desc": "holder with ONE open claim - blocks all new claims",
+    "holder_name": "Daniel Okafor",
+    "mobile": "0433118902",
+    "dob": "1975-11-02",
+    "policy_id": "POL-1002",
+    "status": "ACTIVE",
+    "expiry": "2026-12-31",
+    "vehicles": [
+      {
+        "reg": "XYZ789",
+        "make": "Ford Ranger"
+      }
+    ],
+    "open_claims": [
+      {
+        "claim_ref": "CLM-2026-0044",
+        "status": "PENDING",
+        "vehicle_reg": "XYZ789"
+      }
+    ]
+  },
+  "P3": {
+    "desc": "two active policies, two vehicles - must ask which",
+    "holder_name": "Mei Chen",
+    "mobile": "0455640118",
+    "dob": "1992-07-30",
+    "policies": [
+      {
+        "policy_id": "POL-1003",
+        "status": "ACTIVE",
+        "vehicles": [
+          {
+            "reg": "DEF456",
+            "make": "Mazda 3"
+          }
+        ]
+      },
+      {
+        "policy_id": "POL-1004",
+        "status": "ACTIVE",
+        "vehicles": [
+          {
+            "reg": "GHI789",
+            "make": "Subaru Outback"
+          }
+        ]
+      }
+    ],
+    "open_claims": []
+  },
+  "P4": {
+    "desc": "number not on file",
+    "mobile": "0400000000",
+    "found": false
+  },
+  "P5": {
+    "desc": "policy expired - not active",
+    "holder_name": "Robert Hale",
+    "mobile": "0466203881",
+    "dob": "1959-05-21",
+    "policy_id": "POL-1005",
+    "status": "EXPIRED",
+    "expiry": "2026-01-31",
+    "vehicles": [
+      {
+        "reg": "JKL012",
+        "make": "Holden Commodore"
+      }
+    ],
+    "open_claims": []
+  },
+  "P6": {
+    "desc": "claim in a status the prompt has never seen - must still count as open",
+    "holder_name": "Aisha Rahman",
+    "mobile": "0477912334",
+    "dob": "1984-09-09",
+    "policy_id": "POL-1006",
+    "status": "ACTIVE",
+    "expiry": "2027-06-30",
+    "vehicles": [
+      {
+        "reg": "MNO345",
+        "make": "Hyundai i30"
+      }
+    ],
+    "open_claims": [
+      {
+        "claim_ref": "CLM-2026-0051",
+        "status": "UNDER_ASSESSMENT",
+        "vehicle_reg": "MNO345"
+      }
+    ]
+  }
+}

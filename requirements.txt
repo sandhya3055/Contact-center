@@ -1,2 +1,16 @@
-pipecat-ai[aws-nova-sonic,local,mcp]>=1.8.0,<2
+pipecat-ai[aws-nova-sonic,local,mcp,rnnoise]>=1.8.0,<2
 python-dotenv>=1.0.1,<2.0.0
+
+# Signs MCP requests to the AWS Bedrock AgentCore Gateway (SigV4/IAM auth)
+# using local AWS credentials. Pinned per the package's own recommendation —
+# @latest can pull in breaking changes.
+mcp-proxy-for-aws==1.6.4
+
+# pyrnnoise 0.4.3 (the "rnnoise" extra's pin, and the latest release on PyPI
+# as of writing) calls audiolab's Graph(rate=...), a parameter later
+# releases of audiolab renamed to sample_rate. pyrnnoise doesn't cap its
+# audiolab dependency, so an unpinned install grabs the newest audiolab and
+# breaks noise suppression at runtime ("Graph.__init__() got an unexpected
+# keyword argument 'rate'"). Pin to the last audiolab release with the old
+# signature until pyrnnoise ships a fix.
+audiolab==0.3.8
